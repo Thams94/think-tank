@@ -25,3 +25,6 @@ diagnostics.log
 Thumbs.db
 .vscode/
 .idea/
+
+# 仓库根目录的本地开发脚本（写死绝对路径）
+/tools/
