@@ -124,6 +124,9 @@ async function init() {
     const data = await bridge.loadSession(state.activeSessionId);
     state.activeSessionId = data.id;
     state.messages = data.messages || [];
+    if (Array.isArray(data.members) && data.members.length) {
+      state.members = data.members;
+    }
   }
 
   if (!state.members.length) seedMembers();
@@ -161,7 +164,11 @@ function persistChat() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     if (!state.activeSessionId) return;
-    await bridge.saveSession({ id: state.activeSessionId, messages: state.messages });
+    await bridge.saveSession({
+      id: state.activeSessionId,
+      messages: state.messages,
+      members: state.members,
+    });
     const s = state.sessions.find((x) => x.id === state.activeSessionId);
     if (s) {
       s.messageCount = state.messages.length;
@@ -294,11 +301,18 @@ async function switchSession(id) {
   if (state.running) { pushSystem('正在生成，请先点「停止」'); return; }
   // 先保存当前会话
   if (state.activeSessionId) {
-    await bridge.saveSession({ id: state.activeSessionId, messages: state.messages });
+    await bridge.saveSession({
+      id: state.activeSessionId,
+      messages: state.messages,
+      members: state.members,
+    });
   }
   const data = await bridge.loadSession(id);
   state.activeSessionId = data.id;
   state.messages = data.messages || [];
+  if (Array.isArray(data.members) && data.members.length) {
+    state.members = data.members;
+  }
   renderSessions();
   renderMessages();
   refreshUsageTotal();
@@ -309,7 +323,8 @@ async function newSession() {
   if (state.activeSessionId) {
     await bridge.saveSession({ id: state.activeSessionId, messages: state.messages });
   }
-  const s = await bridge.createSession('新会话');
+  // 新会话继承当前成员快照
+  const s = await bridge.createSession('新会话', state.members);
   state.sessions.unshift({ id: s.id, title: s.title, messageCount: 0, updatedAt: Date.now() });
   state.activeSessionId = s.id;
   state.messages = [];

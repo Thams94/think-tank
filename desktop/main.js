@@ -786,15 +786,16 @@ ipcMain.handle('sessions:list', () => {
   return { sessions: idx.sessions, activeId: idx.activeId };
 });
 
-ipcMain.handle('sessions:create', (_e, title) => {
+ipcMain.handle('sessions:create', (_e, title, members) => {
   const idx = loadSessionIndex();
   const id = newId();
   const t = (title || '').trim() || '新会话';
-  writeJson(sessionPath(id), { id, title: t, messages: [] });
+  const snapshot = Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : [];
+  writeJson(sessionPath(id), { id, title: t, messages: [], members: snapshot });
   idx.sessions.unshift({ id, title: t, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 });
   idx.activeId = id;
   saveSessionIndex(idx);
-  return { id, title: t, messages: [] };
+  return { id, title: t, messages: [], members: snapshot };
 });
 
 ipcMain.handle('sessions:load', (_e, id) => {
@@ -806,13 +807,14 @@ ipcMain.handle('sessions:load', (_e, id) => {
   return file;
 });
 
-ipcMain.handle('sessions:save', (_e, { id, messages, title }) => {
+ipcMain.handle('sessions:save', (_e, { id, messages, title, members }) => {
   const idx = loadSessionIndex();
   const existing = readJson(sessionPath(id), { id, title: '新会话', messages: [] });
   const data = {
     id,
     title: title || existing.title || '新会话',
     messages: Array.isArray(messages) ? messages : existing.messages,
+    members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (existing.members || []),
     savedAt: Date.now(),
   };
   writeJson(sessionPath(id), data);

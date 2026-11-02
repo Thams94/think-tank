@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // 会话
   listSessions: () => ipcRenderer.invoke('sessions:list'),
-  createSession: (title) => ipcRenderer.invoke('sessions:create', title),
+  createSession: (title, members) => ipcRenderer.invoke('sessions:create', title, members),
   loadSession: (id) => ipcRenderer.invoke('sessions:load', id),
   saveSession: (payload) => ipcRenderer.invoke('sessions:save', payload),
   renameSession: (payload) => ipcRenderer.invoke('sessions:rename', payload),

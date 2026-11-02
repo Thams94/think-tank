@@ -200,16 +200,17 @@
     return { sessions: idx.sessions, activeId: idx.activeId };
   }
 
-  async function createSession(title) {
+  async function createSession(title, members) {
     const idx = await getIndex();
     const id = uid();
     const t = (title || '').trim() || '新会话';
-    const data = { id, title: t, messages: [], createdAt: Date.now(), updatedAt: Date.now() };
+    const snapshot = Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : [];
+    const data = { id, title: t, messages: [], members: snapshot, createdAt: Date.now(), updatedAt: Date.now() };
     await idbPut('sessions', data);
     idx.sessions.unshift({ id, title: t, messageCount: 0, createdAt: data.createdAt, updatedAt: data.updatedAt });
     idx.activeId = id;
     await putIndex(idx);
-    return { id, title: t, messages: [] };
+    return { id, title: t, messages: [], members: snapshot };
   }
 
   async function loadSession(id) {
@@ -221,12 +222,13 @@
     return s;
   }
 
-  async function saveSession({ id, messages, title }) {
+  async function saveSession({ id, messages, title, members }) {
     const old = (await idbGet('sessions', id)) || { id, title: '新会话', messages: [] };
     const data = {
       id,
       title: title || old.title,
       messages: Array.isArray(messages) ? messages : old.messages,
+      members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (old.members || []),
       createdAt: old.createdAt || Date.now(),
       updatedAt: Date.now(),
     };
