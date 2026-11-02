@@ -1,10 +1,10 @@
 {
   "name": "ai-group-chat",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "多模型群聊：把不同 AI 拉进同一个对话，支持私密@与多种调度",
   "main": "main.js",
   "author": "local",
-  "license": "AGPL-3.0",
+  "license": "MIT",
   "scripts": {
     "start": "electron .",
     "selftest": "node tools/selftest.js",
@@ -66,11 +66,5 @@
   "dependencies": {
     "mammoth": "^1.13.0",
     "pdf-parse": "^2.4.5"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Thams94/ai-group-chat.git",
-    "directory": "desktop"
-  },
-  "homepage": "https://github.com/Thams94/ai-group-chat"
+  }
 }

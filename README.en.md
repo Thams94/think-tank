@@ -35,6 +35,7 @@ This tool lets you put models from different vendors in the same "group chat" so
 | **Private @** (only you and the mentioned model can see it) | ✅ | ✅ |
 | Three schedulers: manual @ / round-robin / moderator | ✅ | ✅ |
 | Streaming output + reasoning trace | ✅ | ✅ |
+| **Markdown rendering** (headings, lists, tables, code blocks, links; sanitized) | ✅ | ✅ |
 | Multiple sessions, three-column layout, collapsible sidebars | ✅ | ✅ |
 | Stop / continue / regenerate / edit messages | ✅ | ✅ |
 | Local knowledge base (PDF / Word / TXT) | ✅ multi-file | ✅ |

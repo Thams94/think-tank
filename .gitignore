@@ -28,3 +28,6 @@ Thumbs.db
 
 # 仓库根目录的本地开发脚本（写死绝对路径）
 /tools/
+
+# 测试用浏览器配置
+.edge-profile/

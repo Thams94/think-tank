@@ -29,6 +29,46 @@ function escapeHtml(s) {
   ));
 }
 
+/* ---------------- Markdown 渲染 ---------------- */
+
+let mdConfigured = false;
+
+function mdRender(text) {
+  if (!window.marked || !window.DOMPurify) return escapeHtml(text);
+  if (!mdConfigured) {
+    window.marked.setOptions({ gfm: true, breaks: true });
+    mdConfigured = true;
+  }
+  try {
+    const raw = window.marked.parse(String(text || ''));
+    const clean = window.DOMPurify.sanitize(raw, { ADD_ATTR: ['target', 'rel'] });
+    const box = document.createElement('div');
+    box.innerHTML = clean;
+    box.querySelectorAll('a[href]').forEach((a) => {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    });
+    return box.innerHTML;
+  } catch (e) {
+    return escapeHtml(text);
+  }
+}
+
+/** 流式输出用 requestAnimationFrame 节流，避免每个字都重排 */
+function makeMdUpdater(el) {
+  let pending = false;
+  let latest = '';
+  return (text) => {
+    latest = text;
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      el.innerHTML = mdRender(latest);
+    });
+  };
+}
+
 function initials(name) {
   const n = String(name || '?').trim();
   return n ? n.slice(0, 1).toUpperCase() : '?';
@@ -433,7 +473,7 @@ function messageNode(m) {
     <div class="avatar" style="background:${escapeHtml(color)}">${escapeHtml(m.role === 'user' ? '我' : initials(name))}</div>
     <div class="body">
       <div class="head"><span class="who">${escapeHtml(name)}</span>${badges.join('')}${actsHtml}</div>
-      <div class="bubble">${escapeHtml(m.text || '')}</div>
+      <div class="bubble md">${mdRender(m.text || '')}</div>
       ${m.reasoning ? `<div class="reasoning">${escapeHtml(m.reasoning)}</div>` : ''}
       ${m.error ? `<div class="err">${escapeHtml(m.error)}</div>` : ''}
       ${usageHtml(m)}
@@ -625,6 +665,7 @@ async function runMember(member, opts = {}) {
   $('#messages').scrollTop = $('#messages').scrollHeight;
 
   const bubble = node.querySelector('.bubble');
+  const updateMd = makeMdUpdater(bubble);
   const runId = uid();
   state.activeRuns.add(runId);
 
@@ -638,7 +679,7 @@ async function runMember(member, opts = {}) {
     }
     if (d.type === 'content') {
       msg.text += d.text;
-      bubble.textContent = msg.text;
+      updateMd(msg.text);
       $('#messages').scrollTop = $('#messages').scrollHeight;
     } else if (d.type === 'reasoning') {
       msg.reasoning += d.text;
@@ -681,7 +722,7 @@ async function runMember(member, opts = {}) {
       }
     } else if (!msg.text && res.text) {
       msg.text = res.text;
-      bubble.textContent = msg.text;
+      bubble.innerHTML = mdRender(msg.text);
     }
   } catch (e) {
     if (/abort|cancel/i.test(String(e.message || e))) msg.stopped = true;
@@ -721,10 +762,11 @@ async function continueMessage(m) {
 
   const runId = uid();
   state.activeRuns.add(runId);
+  const updateMd = makeMdUpdater(bubble);
   const off = bridge.onDelta((d) => {
     if (d.runId !== runId || d.type !== 'content') return;
     m.text += d.text;
-    bubble.textContent = m.text;
+    updateMd(m.text);
     $('#messages').scrollTop = $('#messages').scrollHeight;
   });
 
