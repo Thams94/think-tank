@@ -6,6 +6,10 @@
 
 ![界面](web/docs/screenshot.png)
 
+*Markdown 渲染效果：*
+
+![Markdown](web/docs/markdown.png)
+
 ---
 
 ## 它解决什么问题

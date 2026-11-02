@@ -6,6 +6,10 @@ English | [简体中文](README.md)
 
 ![Screenshot](web/docs/screenshot.png)
 
+*Markdown rendering:*
+
+![Markdown](web/docs/markdown.png)
+
 ---
 
 ## Why
