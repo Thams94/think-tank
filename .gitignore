@@ -1,30 +1,27 @@
-# 依赖与构建产物
+﻿# 依赖与构建产物
 node_modules/
 dist/
 release/
 build/
 
-# 测试与临时文件
-.testfiles/
-.edge-profile/
-.tmp/
+# 本机数据
 backup/
+.testprofile/
+.tmp/
 *.log
-
-# 系统与编辑器
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# 本地配置（含密钥，任何情况下都不要提交）
 config.json
 chats.json
 sessions/
 sessions.json
 kb-cache/
 diagnostics.log
-*.7z
 
-# ���������ű���д������·������ͨ�ã�
-tools/
+# 压缩包
+*.7z
+*.zip
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

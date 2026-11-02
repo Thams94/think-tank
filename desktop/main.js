@@ -1,0 +1,1011 @@
+'use strict';
+
+const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, net, session, dialog } = require('electron');
+const path = require('node:path');
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+
+// 数据目录固定为 %APPDATA%/ai-group-chat，
+// 否则打包后应用名变化（AI群聊）会指向另一个目录，看起来像"配置丢了"。
+// AIGC_USER_DIR 仅用于测试隔离。
+if (process.env.AIGC_USER_DIR) {
+  app.setPath('userData', process.env.AIGC_USER_DIR);
+} else {
+  app.setPath('userData', path.join(app.getPath('appData'), 'ai-group-chat'));
+}
+
+const USER_DIR = app.getPath('userData');
+const CONFIG_FILE = path.join(USER_DIR, 'config.json');
+const CHAT_FILE = path.join(USER_DIR, 'chats.json');       // 旧版单会话文件（迁移用）
+const SESSIONS_FILE = path.join(USER_DIR, 'sessions.json'); // 会话索引
+const SESSIONS_DIR = path.join(USER_DIR, 'sessions');       // 每个会话一个文件
+const KB_CACHE_DIR = path.join(USER_DIR, 'kb-cache');       // 知识库解析结果缓存
+
+let win = null;
+const running = new Map(); // runId -> AbortController
+
+/* ---------------- 通用 ---------------- */
+
+function readJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * 统一 HTTP 出口。
+ * Node 的全局 fetch 不认系统代理，需要代理的网络下会直接超时；
+ * 优先用 Electron 的 net.fetch（Chromium 网络栈，遵循系统代理）。
+ */
+async function httpFetch(url, opts = {}) {
+  if (net && typeof net.fetch === 'function') {
+    return net.fetch(url, opts);
+  }
+  return fetch(url, opts);
+}
+
+function applyProxy(cfg) {
+  const rules = (cfg && cfg.proxy ? String(cfg.proxy) : '').trim();
+  try {
+    if (rules) {
+      session.defaultSession.setProxy({ proxyRules: rules });
+    } else {
+      session.defaultSession.setProxy({ mode: 'system' });
+    }
+  } catch (e) {
+    console.warn('设置代理失败:', e.message);
+  }
+}
+
+function newId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/* ---------------- 加密 ---------------- */
+
+function encryptKey(key) {
+  if (!key) return '';
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      return 'dpapi:' + safeStorage.encryptString(key).toString('base64');
+    }
+  } catch (e) {
+    console.warn('系统加密不可用，退回 base64:', e.message);
+  }
+  return 'plain:' + Buffer.from(key, 'utf8').toString('base64');
+}
+
+function decryptKey(enc) {
+  if (!enc) return '';
+  try {
+    if (enc.startsWith('dpapi:')) {
+      return safeStorage.decryptString(Buffer.from(enc.slice(6), 'base64'));
+    }
+    if (enc.startsWith('plain:')) {
+      return Buffer.from(enc.slice(6), 'base64').toString('utf8');
+    }
+    // 兼容旧格式（纯 base64，无前缀）
+    if (safeStorage.isEncryptionAvailable()) {
+      try {
+        return safeStorage.decryptString(Buffer.from(enc, 'base64'));
+      } catch {
+        /* 落到下面的 base64 兜底 */
+      }
+    }
+    return Buffer.from(enc, 'base64').toString('utf8');
+  } catch (e) {
+    console.warn('解密失败:', e.message);
+    return '';
+  }
+}
+
+/* ---------------- 配置 ---------------- */
+
+function normalizeProvider(p) {
+  return {
+    id: p.id || newId(),
+    name: p.name || '未命名供应商',
+    baseUrl: p.baseUrl || '',
+    apiKeyEnc: p.apiKeyEnc || '',
+    models: Array.isArray(p.models) ? p.models : [],
+  };
+}
+
+/**
+ * 读取配置，并做一次迁移：
+ * 旧版只有顶层 baseUrl / apiKeyEnc，没有 providers —— 自动转成一个"默认"供应商，
+ * 并把没有 providerId 的成员挂到它下面。
+ */
+function loadConfig() {
+  const raw = readJson(CONFIG_FILE, {});
+
+  let providers = Array.isArray(raw.providers) ? raw.providers.map(normalizeProvider) : [];
+
+  const legacyUrl = raw.baseUrl || '';
+  const legacyKey = raw.apiKeyEnc || '';
+  if (!providers.length && (legacyUrl || legacyKey)) {
+    providers = [normalizeProvider({
+      id: 'p-default',
+      name: '默认',
+      baseUrl: legacyUrl,
+      apiKeyEnc: legacyKey,
+    })];
+  }
+
+  const fallbackId = providers[0] ? providers[0].id : null;
+
+  let members = Array.isArray(raw.members) ? raw.members : [];
+  members = members.map((m) => ({
+    id: m.id || newId(),
+    name: m.name || '成员',
+    providerId: m.providerId || fallbackId,
+    model: m.model || '',
+    persona: m.persona || '',
+    temp: typeof m.temp === 'number' ? m.temp : 0.7,
+    color: m.color || '#5b8def',
+    enabled: m.enabled !== false,
+  }));
+
+  return {
+    providers,
+    proxy: raw.proxy || '',
+    groupPrompt: raw.groupPrompt || '',
+    kb: raw.kb || { enabled: true, budget: 12000, files: [] },
+    members,
+    settings: raw.settings || { mode: 'manual', rounds: 1, moderatorId: null },
+  };
+}
+
+function saveConfig(cfg) {
+  writeJson(CONFIG_FILE, cfg);
+  return cfg;
+}
+
+function getProvider(cfg, providerId) {
+  const list = cfg.providers || [];
+  return list.find((p) => p.id === providerId) || list[0] || null;
+}
+
+function normalizeBase(baseUrl) {
+  let b = String(baseUrl || '').trim();
+  if (!b) throw new Error('供应商还没填 API 地址');
+  b = b.replace(/\/+$/, '');
+  if (!/\/v\d+$/.test(b)) b += '/v1';
+  return b;
+}
+
+/* ---------------- OpenAI 兼容 ---------------- */
+
+async function listModels(cfg, providerId, keyOverride) {
+  const provider = getProvider(cfg, providerId);
+  if (!provider) throw new Error('还没有配置供应商');
+  const base = normalizeBase(provider.baseUrl);
+  const key = keyOverride || decryptKey(provider.apiKeyEnc);
+
+  const res = await httpFetch(`${base}/models`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}：${(await res.text()).slice(0, 300)}`);
+  const data = await res.json();
+  const items = data.data || data.models || [];
+  return items
+    .map((m) => (typeof m === 'string' ? m : m.id))
+    .filter(Boolean)
+    .sort();
+}
+
+async function streamChat({ baseUrl, apiKey, model, messages, temperature, signal, onDelta, maxTokens, reasoning }) {
+  const base = normalizeBase(baseUrl);
+  const body = {
+    model,
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },   // 让服务端在末尾回传 token 用量
+    temperature: typeof temperature === 'number' ? temperature : 0.7,
+  };
+  if (typeof maxTokens === 'number' && maxTokens > 0) body.max_tokens = maxTokens;
+  // 思考强度：OpenAI 兼容的 reasoning_effort
+  const wantReasoning = reasoning && reasoning !== 'off' ? String(reasoning) : null;
+  if (wantReasoning) body.reasoning_effort = wantReasoning;
+
+  const res = await httpFetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!res.ok) {
+    let text = await res.text();
+    // 服务端不认 reasoning_effort：去掉后重试一次（部分中转站会直接 400）
+    if (body.reasoning_effort && /reasoning|thinking|unsupported|unknown|invalid/i.test(text)) {
+      const retryBody = { ...body };
+      delete retryBody.reasoning_effort;
+      const retry = await httpFetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify(retryBody),
+        signal,
+      });
+      if (retry.ok) {
+        appendDiag({ kind: 'reasoning-fallback', model, status: res.status });
+        return readStream(retry, onDelta);
+      }
+      text = await retry.text();
+    }
+    throw new Error(`HTTP ${res.status}：${text.slice(0, 500)}`);
+  }
+
+  return readStream(res, onDelta);
+}
+
+/** 解析 SSE 流（供正常请求与重试共用） */
+async function readStream(res, onDelta) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let full = '';
+  let usage = null;
+  let finishReason = null;
+  let sawDone = false;
+  let reasoningChars = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let idx;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') { sawDone = true; continue; }
+      try {
+        const json = JSON.parse(payload);
+        if (json.usage) {
+          usage = json.usage;
+          onDelta({ type: 'usage', usage: json.usage });
+        }
+        const choice = json.choices?.[0];
+        if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+        const delta = choice?.delta || {};
+        if (delta.reasoning_content) {
+          reasoningChars += delta.reasoning_content.length;
+          onDelta({ type: 'reasoning', text: delta.reasoning_content });
+        }
+        if (delta.content) {
+          full += delta.content;
+          onDelta({ type: 'content', text: delta.content });
+        }
+      } catch {
+        /* 忽略解析失败的行 */
+      }
+    }
+  }
+  // 没收到 finish_reason 且没收到 [DONE]，说明流被中途掐断了
+  const truncated = finishReason === 'length';
+  const interrupted = !sawDone && !finishReason;
+  return { text: full, usage, finishReason, sawDone, truncated, interrupted, reasoningChars };
+}
+
+/* ---------------- 窗口 ---------------- */
+
+function createWindow() {
+  win = new BrowserWindow({
+    width: 1360,
+    height: 900,
+    minWidth: 980,
+    minHeight: 640,
+    title: 'AI 群聊',
+    backgroundColor: '#0f1117',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+}
+
+function buildMenu() {
+  const template = [
+    {
+      label: '文件',
+      submenu: [
+        { label: '打开数据目录', click: () => shell.openPath(USER_DIR) },
+        { type: 'separator' },
+        { role: 'quit', label: '退出' },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload', label: '重新加载' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '实际大小' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/* ---------------- IPC ---------------- */
+
+ipcMain.handle('config:get', () => {
+  const cfg = loadConfig();
+  return {
+    providers: cfg.providers.map((p) => ({
+      id: p.id,
+      name: p.name,
+      baseUrl: p.baseUrl,
+      hasKey: Boolean(p.apiKeyEnc),
+      models: p.models,
+    })),
+    proxy: cfg.proxy,
+    groupPrompt: cfg.groupPrompt,
+    kb: cfg.kb,
+    members: cfg.members,
+    settings: cfg.settings,
+  };
+});
+
+ipcMain.handle('config:save', (_e, patch) => {
+  const cfg = loadConfig();
+
+  if (typeof patch.proxy === 'string') cfg.proxy = patch.proxy.trim();
+  if (typeof patch.groupPrompt === 'string') cfg.groupPrompt = patch.groupPrompt;
+  if (patch.kb && typeof patch.kb === 'object') cfg.kb = patch.kb;
+
+  if (Array.isArray(patch.providers)) {
+    cfg.providers = patch.providers.map((p) => {
+      const old = (cfg.providers || []).find((x) => x.id === p.id);
+      let apiKeyEnc = old ? old.apiKeyEnc : '';
+      if (typeof p.apiKey === 'string' && p.apiKey) apiKeyEnc = encryptKey(p.apiKey);
+      if (p.clearKey) apiKeyEnc = '';
+      return normalizeProvider({
+        id: p.id,
+        name: p.name,
+        baseUrl: p.baseUrl,
+        apiKeyEnc,
+        models: p.models,
+      });
+    });
+  }
+
+  if (Array.isArray(patch.members)) {
+    cfg.members = patch.members.map((m) => ({
+      id: m.id || newId(),
+      name: m.name || '成员',
+      providerId: m.providerId || (cfg.providers[0] ? cfg.providers[0].id : null),
+      model: m.model || '',
+      persona: m.persona || '',
+      temp: typeof m.temp === 'number' ? m.temp : 0.7,
+      color: m.color || '#5b8def',
+      enabled: m.enabled !== false,
+    }));
+  }
+
+  if (patch.settings) cfg.settings = { ...cfg.settings, ...patch.settings };
+
+  saveConfig(cfg);
+  applyProxy(cfg);
+  return { ok: true };
+});
+
+ipcMain.handle('models:list', async (_e, providerId, apiKey) => {
+  const cfg = loadConfig();
+  return listModels(cfg, providerId, apiKey || undefined);
+});
+
+/* ---------------- 联网搜索 ---------------- */
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)));
+}
+
+function stripTags(html) {
+  return decodeEntities(
+    String(html)
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+  ).replace(/\s+/g, ' ').trim();
+}
+
+async function fetchText(url, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await httpFetch(url, {
+      headers: {
+        'User-Agent': UA,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      },
+      signal: controller.signal,
+    });
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { status: res.status, text: buf.toString('utf8') };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function searchBing(query) {
+  const url = `https://cn.bing.com/search?q=${encodeURIComponent(query)}&setlang=zh-CN&ensearch=0`;
+  const { status, text } = await fetchText(url);
+  if (status !== 200) throw new Error('Bing HTTP ' + status);
+  const out = [];
+  const blocks = text.split(/<li class="b_algo"/i).slice(1);
+  for (const b of blocks) {
+    const m = b.match(/<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    if (!m) continue;
+    const href = decodeEntities(m[1]);
+    const title = stripTags(m[2]);
+    const snip = (b.match(/<p[^>]*>([\s\S]*?)<\/p>/i) || [])[1] || '';
+    if (!/^https?:\/\//i.test(href)) continue;
+    out.push({ title, url: href, snippet: stripTags(snip).slice(0, 300) });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+async function searchDuckDuckGo(query) {
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const { status, text } = await fetchText(url);
+  if (status !== 200) throw new Error('DDG HTTP ' + status);
+  const out = [];
+  const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(text)) && out.length < 8) {
+    let href = decodeEntities(m[1]);
+    const u = href.match(/uddg=([^&]+)/);
+    if (u) href = decodeURIComponent(u[1]);
+    if (!/^https?:\/\//i.test(href)) continue;
+    out.push({ title: stripTags(m[2]), url: href, snippet: stripTags(m[3]).slice(0, 300) });
+  }
+  return out;
+}
+
+ipcMain.handle('websearch:run', async (_e, { query, fetchPages = 3, maxChars = 1500 }) => {
+  const q = String(query || '').trim();
+  if (!q) return { ok: false, error: '空查询', results: [] };
+
+  const sources = [];
+  let results = [];
+  const errors = [];
+
+  for (const [name, fn] of [['bing', searchBing], ['duckduckgo', searchDuckDuckGo]]) {
+    try {
+      const r = await fn(q);
+      if (r.length) { results = r; sources.push(name); break; }
+      errors.push(`${name}: 无结果`);
+    } catch (e) {
+      errors.push(`${name}: ${String(e.message || e).slice(0, 80)}`);
+    }
+  }
+
+  if (!results.length) {
+    return { ok: false, error: errors.join(' | '), results: [], pages: [] };
+  }
+
+  // 抓正文（前 N 条）
+  const pages = [];
+  for (const r of results.slice(0, fetchPages)) {
+    try {
+      const { status, text } = await fetchText(r.url, 12000);
+      if (status !== 200) continue;
+      const body = stripTags(text);
+      if (body.length < 80) continue;
+      pages.push({ title: r.title, url: r.url, content: body.slice(0, maxChars) });
+    } catch { /* 单条失败忽略 */ }
+  }
+
+  appendDiag({ kind: 'search', query: q, source: sources[0], results: results.length, pages: pages.length });
+  return { ok: true, source: sources[0], results: results.slice(0, 8), pages, error: null };
+});
+
+/* ---------------- 知识库 ---------------- */
+
+const TEXT_EXTS = new Set([
+    '.txt', '.md', '.markdown', '.json', '.csv', '.log', '.yml', '.yaml', '.xml', '.ini', '.conf',
+    '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.java', '.c', '.h', '.cpp', '.hpp', '.cs',
+    '.go', '.rs', '.rb', '.php', '.sh', '.ps1', '.bat', '.sql', '.html', '.css', '.vue', '.swift', '.kt',
+]);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
+
+function fileHash(p) {
+  try {
+    const st = fs.statSync(p);
+    return crypto.createHash('sha1').update(p + ':' + st.size + ':' + st.mtimeMs).digest('hex').slice(0, 16);
+  } catch {
+    return crypto.createHash('sha1').update(p).digest('hex').slice(0, 16);
+  }
+}
+
+function cachePath(p) {
+  return path.join(KB_CACHE_DIR, fileHash(p) + '.txt');
+}
+
+async function extractText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (TEXT_EXTS.has(ext)) {
+    return fs.readFileSync(filePath, 'utf8');
+  }
+
+  if (ext === '.pdf') {
+    // pdf-parse v2 导出的是 PDFParse 类
+    const { PDFParse } = require('pdf-parse');
+    const buf = fs.readFileSync(filePath);
+    const parser = new PDFParse({ data: buf });
+    try {
+      const result = await parser.getText();
+      return (result.text || '').replace(/\n-- \d+ of \d+ --\n?$/, '\n');
+    } finally {
+      try { await parser.destroy(); } catch { /* 忽略 */ }
+    }
+  }
+
+  if (ext === '.docx') {
+    const mammoth = require('mammoth');
+    const r = await mammoth.extractRawText({ path: filePath });
+    return r.value || '';
+  }
+
+  if (ext === '.doc') {
+    throw new Error('不支持旧版 .doc，请另存为 .docx');
+  }
+
+  throw new Error('不支持的文件类型：' + (ext || '无扩展名'));
+}
+
+/** Windows 自带 OCR（WinRT），不需要安装额外软件 */
+async function ocrImage(filePath) {
+  const script = path.join(__dirname, 'tools', 'ocr.ps1');
+  const { execFile } = require('node:child_process');
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Path', filePath],
+      { timeout: 60000, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error((stderr || err.message).slice(0, 300)));
+        let text = String(stdout || '').trim();
+        // Windows OCR 会在汉字之间插空格，去掉它
+        text = text.replace(/(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])/g, '');
+        resolve(text);
+      });
+  });
+}
+
+async function kbEnsureCache(entry) {
+  const cp = cachePath(entry.path);
+  if (fs.existsSync(cp)) return fs.readFileSync(cp, 'utf8');
+
+  let text = '';
+  if (entry.kind === 'image') {
+    text = await ocrImage(entry.path);
+  } else {
+    text = await extractText(entry.path);
+  }
+  fs.mkdirSync(KB_CACHE_DIR, { recursive: true });
+  fs.writeFileSync(cp, text, 'utf8');
+  return text;
+}
+
+ipcMain.handle('kb:pick', async () => {
+  const win = BrowserWindow.getAllWindows()[0] || null;
+  const r = await dialog.showOpenDialog(win, {
+    title: '添加知识库文件',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '文档', extensions: ['pdf', 'docx', 'txt', 'md', 'markdown'] },
+      { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+      { name: '代码/文本', extensions: ['json', 'csv', 'py', 'js', 'ts', 'java', 'c', 'cpp', 'go', 'rs', 'sql', 'html', 'css', 'yml', 'yaml', 'xml', 'log'] },
+      { name: '全部文件', extensions: ['*'] },
+    ],
+  });
+  try {
+    if (win && !win.isDestroyed()) { win.show(); win.focus(); win.webContents.focus(); }
+  } catch { /* 忽略 */ }
+  return r.canceled ? [] : r.filePaths;
+});
+
+ipcMain.handle('kb:index', async (_e, paths) => {
+  const out = [];
+  for (const p of paths || []) {
+    const ext = path.extname(p).toLowerCase();
+    const kind = IMAGE_EXTS.has(ext) ? 'image' : 'doc';
+    const entry = { path: p, name: path.basename(p), kind };
+    try {
+      const text = await kbEnsureCache(entry);
+      entry.chars = text.length;
+      entry.ok = true;
+    } catch (e) {
+      entry.ok = false;
+      entry.error = String(e.message || e);
+      entry.chars = 0;
+    }
+    out.push(entry);
+  }
+  return out;
+});
+
+/**
+ * 组装知识库上下文。
+ * budget: 允许注入的最大字符数（约等于 tokens * 1.5 的中文比例，粗算即可）
+ * wantImages: 成员是否支持看图（支持则返回图片，交给模型直接看）
+ */
+ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false }) => {
+  const docs = (files || []).filter((f) => f.kind !== 'image');
+  const images = (files || []).filter((f) => f.kind === 'image');
+
+  const parts = [];
+  let used = 0;
+  let skipped = 0;
+
+  for (const f of docs) {
+    try {
+      let text = await kbEnsureCache(f);
+      text = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      if (!text) { skipped++; continue; }
+
+      const remain = budget - used;
+      if (remain <= 200) { skipped++; continue; }
+
+      const slice = text.slice(0, remain);
+      const cut = slice.length < text.length;
+      parts.push(`【资料：${f.name}】\n${slice}${cut ? '\n…（内容过长已截断）' : ''}`);
+      used += slice.length;
+    } catch (e) {
+      skipped++;
+    }
+  }
+
+  const text = parts.join('\n\n');
+
+  // 图片：给视觉模型直接看（最多 6 张，避免请求过大）
+  const imagePayload = [];
+  if (wantImages) {
+    for (const f of images.slice(0, 6)) {
+      try {
+        const buf = fs.readFileSync(f.path);
+        const mime = f.path.toLowerCase().endsWith('.png') ? 'image/png'
+          : f.path.toLowerCase().endsWith('.webp') ? 'image/webp'
+          : f.path.toLowerCase().endsWith('.gif') ? 'image/gif'
+          : f.path.toLowerCase().endsWith('.bmp') ? 'image/bmp'
+          : 'image/jpeg';
+        imagePayload.push({ name: f.name, url: `data:${mime};base64,${buf.toString('base64')}` });
+      } catch { /* 忽略单张 */ }
+    }
+  } else {
+    // 非视觉模型：把图片 OCR 成文字
+    for (const f of images) {
+      try {
+        const t = (await kbEnsureCache(f)) || '';
+        const clean = t.trim();
+        if (!clean) continue;
+        const remain = budget - used;
+        if (remain <= 100) break;
+        const slice = clean.slice(0, remain);
+        parts.push(`【图片OCR：${f.name}】\n${slice}`);
+        used += slice.length;
+      } catch { /* 忽略 */ }
+    }
+  }
+
+  return {
+    text: parts.join('\n\n'),
+    used,
+    skipped,
+    docCount: docs.length,
+    imageCount: images.length,
+    images: imagePayload,
+  };
+});
+
+/* ---------------- 会话存储 ---------------- */
+
+function sessionPath(id) {
+  return path.join(SESSIONS_DIR, `${id}.json`);
+}
+
+function saveSessionIndex(idx) {
+  writeJson(SESSIONS_FILE, idx);
+}
+
+/** 读取索引；首次使用时把旧的 chats.json 迁移成第一个会话。 */
+function loadSessionIndex() {
+  let idx = readJson(SESSIONS_FILE, null);
+  if (!idx || !Array.isArray(idx.sessions)) {
+    idx = { sessions: [], activeId: null };
+  }
+
+  if (!idx.sessions.length) {
+    const old = readJson(CHAT_FILE, { messages: [] });
+    if (Array.isArray(old.messages) && old.messages.length) {
+      const id = newId();
+      const title = '历史会话';
+      writeJson(sessionPath(id), { id, title, messages: old.messages });
+      idx.sessions.push({
+        id, title,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messageCount: old.messages.length,
+      });
+      idx.activeId = id;
+      saveSessionIndex(idx);
+    }
+  }
+
+  return idx;
+}
+
+function touchSession(idx, id, patchObj) {
+  const s = idx.sessions.find((x) => x.id === id);
+  if (!s) return null;
+  Object.assign(s, patchObj, { updatedAt: Date.now() });
+  saveSessionIndex(idx);
+  return s;
+}
+
+ipcMain.handle('sessions:list', () => {
+  const idx = loadSessionIndex();
+  return { sessions: idx.sessions, activeId: idx.activeId };
+});
+
+ipcMain.handle('sessions:create', (_e, title) => {
+  const idx = loadSessionIndex();
+  const id = newId();
+  const t = (title || '').trim() || '新会话';
+  writeJson(sessionPath(id), { id, title: t, messages: [] });
+  idx.sessions.unshift({ id, title: t, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 });
+  idx.activeId = id;
+  saveSessionIndex(idx);
+  return { id, title: t, messages: [] };
+});
+
+ipcMain.handle('sessions:load', (_e, id) => {
+  const idx = loadSessionIndex();
+  const file = readJson(sessionPath(id), null);
+  if (!file) return { id, title: '（已丢失）', messages: [] };
+  idx.activeId = id;
+  saveSessionIndex(idx);
+  return file;
+});
+
+ipcMain.handle('sessions:save', (_e, { id, messages, title }) => {
+  const idx = loadSessionIndex();
+  const existing = readJson(sessionPath(id), { id, title: '新会话', messages: [] });
+  const data = {
+    id,
+    title: title || existing.title || '新会话',
+    messages: Array.isArray(messages) ? messages : existing.messages,
+    savedAt: Date.now(),
+  };
+  writeJson(sessionPath(id), data);
+  touchSession(idx, id, { messageCount: data.messages.length, title: data.title });
+  return { ok: true, count: data.messages.length };
+});
+
+ipcMain.handle('sessions:rename', (_e, { id, title }) => {
+  const idx = loadSessionIndex();
+  const t = (title || '').trim() || '未命名';
+  const file = readJson(sessionPath(id), { id, title: t, messages: [] });
+  file.title = t;
+  writeJson(sessionPath(id), file);
+  touchSession(idx, id, { title: t });
+  return { ok: true };
+});
+
+ipcMain.handle('sessions:delete', (_e, id) => {
+  const idx = loadSessionIndex();
+  idx.sessions = idx.sessions.filter((s) => s.id !== id);
+  if (idx.activeId === id) idx.activeId = idx.sessions[0] ? idx.sessions[0].id : null;
+  saveSessionIndex(idx);
+  try { fs.unlinkSync(sessionPath(id)); } catch { /* 已不存在 */ }
+  return { ok: true, activeId: idx.activeId };
+});
+
+ipcMain.handle('chat:load', () => readJson(CHAT_FILE, { messages: [] }));
+ipcMain.handle('chat:save', (_e, data) => {
+  writeJson(CHAT_FILE, data);
+  return { ok: true };
+});
+ipcMain.handle('chat:clear', () => {
+  writeJson(CHAT_FILE, { messages: [] });
+  return { ok: true };
+});
+
+ipcMain.handle('chat:run', async (e, req) => {
+  const { runId } = req;
+  const cfg = loadConfig();
+  const provider = getProvider(cfg, req.providerId);
+  if (!provider) {
+    return { ok: false, error: '没有可用的供应商，请先在设置里添加' };
+  }
+  const apiKey = decryptKey(provider.apiKeyEnc);
+
+  const controller = new AbortController();
+  running.set(runId, controller);
+  const sender = e.sender;
+  try {
+    let msgs = req.messages;
+    // 知识库图片：塞进最后一条 user 消息，变成多模态内容
+    if (Array.isArray(req.images) && req.images.length) {
+      msgs = msgs.slice();
+      const lastIdx = msgs.map((m, i) => (m.role === 'user' ? i : -1)).filter((i) => i >= 0).pop();
+      if (lastIdx !== undefined && lastIdx >= 0) {
+        const last = msgs[lastIdx];
+        msgs[lastIdx] = {
+          role: 'user',
+          content: [
+            { type: 'text', text: String(last.content) },
+            ...req.images.map((img) => ({ type: 'image_url', image_url: { url: img.url } })),
+          ],
+        };
+      }
+    }
+
+    const out = await streamChat({
+      baseUrl: provider.baseUrl,
+      apiKey,
+      model: req.model,
+      messages: msgs,
+      temperature: req.temperature,
+      maxTokens: req.maxTokens,
+      reasoning: req.reasoning,
+      signal: controller.signal,
+      onDelta: (d) => {
+        if (!sender.isDestroyed()) sender.send('chat:delta', { runId, ...d });
+      },
+    });
+    if (!sender.isDestroyed()) {
+      sender.send('chat:done', {
+        runId, text: out.text, usage: out.usage,
+        finishReason: out.finishReason, truncated: out.truncated, interrupted: out.interrupted,
+      });
+    }
+    appendDiag({
+      kind: 'chat', model: req.model, chars: out.text.length,
+      finishReason: out.finishReason, sawDone: out.sawDone,
+      truncated: out.truncated, interrupted: out.interrupted,
+      reasoningChars: out.reasoningChars,
+    });
+    return {
+      ok: true, text: out.text, usage: out.usage,
+      finishReason: out.finishReason, truncated: out.truncated, interrupted: out.interrupted,
+    };
+  } catch (err) {
+    const msg = String(err.message || err);
+    if (!sender.isDestroyed()) sender.send('chat:error', { runId, message: msg });
+    return { ok: false, error: msg };
+  } finally {
+    running.delete(runId);
+  }
+});
+
+function appendDiag(obj) {
+  try {
+    const line = new Date().toISOString() + ' ' + JSON.stringify(obj) + '\n';
+    fs.appendFileSync(path.join(USER_DIR, 'diagnostics.log'), line, 'utf8');
+  } catch { /* 忽略 */ }
+}
+
+/**
+ * 强制把窗口拉到前台。
+ * 原生对话框（confirm / 另存为）关闭后，Chromium 有时不会重新激活窗口，
+ * 表现为：页面里 activeElement 是输入框，但 document.hasFocus() 为 false，
+ * Windows 因此不显示光标、键盘事件也进不来。
+ */
+ipcMain.handle('win:refocus', () => {
+  if (!win || win.isDestroyed()) return { ok: false, reason: 'no-window' };
+  const before = win.isFocused();
+  const docFocused = true; // 仅作记录
+  try {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    // app.focus({steal:true}) 在 Windows 上可强制夺取前台
+    try { app.focus({ steal: true }); } catch { /* 老版本不支持 */ }
+    win.focus();
+    win.webContents.focus();
+    // 关键：让 Chromium 重新把页面焦点还给 WebContents（原生对话框后常丢这个）
+    try { win.blur(); win.focus(); win.webContents.focus(); } catch { /* 忽略 */ }
+    if (!win.isFocused()) {
+      // Windows 前台锁会拦下 focus，用一次最小化/还原强制激活
+      win.minimize();
+      win.restore();
+      win.focus();
+      win.webContents.focus();
+    }
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  const after = win.isFocused();
+  appendDiag({ kind: 'refocus', before, after });
+  return { ok: after, before, after };
+});
+
+ipcMain.handle('diag:dump', (_e, info) => {
+  const file = path.join(USER_DIR, 'diagnostics.log');
+  try {
+    fs.appendFileSync(file, new Date().toISOString() + ' FOCUS ' + JSON.stringify(info) + '\n', 'utf8');
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  return { ok: true, path: file };
+});
+
+ipcMain.handle('export:markdown', async (_e, { content, defaultName }) => {
+  const win = BrowserWindow.getAllWindows()[0] || null;
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    title: '导出讨论记录',
+    defaultPath: defaultName || 'ai-group-chat.md',
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+  });
+  // 原生存取对话框关闭后，窗口可能处于"未激活"状态，主动拉回前台
+  try {
+    if (win && !win.isDestroyed()) {
+      win.show();
+      win.focus();
+      win.webContents.focus();
+    }
+  } catch { /* 忽略 */ }
+
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  fs.writeFileSync(filePath, content, 'utf8');
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle('chat:abort', (_e, runId) => {
+  const c = running.get(runId);
+  if (c) c.abort();
+  return { ok: true };
+});
+
+/* ---------------- 启动 ---------------- */
+
+app.whenReady().then(() => {
+  applyProxy(loadConfig());
+  buildMenu();
+  createWindow();
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});

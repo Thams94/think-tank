@@ -1,0 +1,76 @@
+{
+  "name": "ai-group-chat",
+  "version": "0.3.2",
+  "description": "多模型群聊：把不同 AI 拉进同一个对话，支持私密@与多种调度",
+  "main": "main.js",
+  "author": "local",
+  "license": "AGPL-3.0",
+  "scripts": {
+    "start": "electron .",
+    "selftest": "node tools/selftest.js",
+    "pack": "electron-packager . \"AI群聊\" --platform=win32 --arch=x64 --out=dist --asar --overwrite --ignore=\"^/tools\" --ignore=\"^/dist\"",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.harness.aigroupchat",
+    "productName": "AI群聊",
+    "copyright": "© 2026",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "tools/ocr.ps1",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "AI群聊-安装程序-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI群聊",
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    },
+    "asarUnpack": [
+      "**/node_modules/pdf-parse/**"
+    ]
+  },
+  "dependencies": {
+    "mammoth": "^1.13.0",
+    "pdf-parse": "^2.4.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Thams94/ai-group-chat.git",
+    "directory": "desktop"
+  },
+  "homepage": "https://github.com/Thams94/ai-group-chat"
+}
