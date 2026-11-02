@@ -20,7 +20,12 @@ const state = {
   kbCache: new Map(),
 };
 
-const SAFETY_MAX_SPEAKERS = 200;   // 不限轮数时的硬上限，防止失控烧 token
+const DEFAULT_SAFETY_CAP = 200;   // 不限轮数时的默认上限，可在设置里改
+
+function safetyCap() {
+  const n = Number(state.settings.safetyCap);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SAFETY_CAP;
+}
 
 const $ = (sel) => document.querySelector(sel);
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -476,7 +481,11 @@ function messageNode(m) {
 
   if (m.role === 'system') {
     wrap.className = 'msg';
-    wrap.innerHTML = `<div class="body"><div class="bubble muted">${escapeHtml(m.text)}</div></div>`;
+    wrap.innerHTML = `<div class="body"><div class="bubble muted">${escapeHtml(m.text)}</div>${
+      m.action ? `<button class="act resume-btn">${escapeHtml(m.action.label)}</button>` : ''
+    }</div>`;
+    const btn = wrap.querySelector('.resume-btn');
+    if (btn && m.action) btn.onclick = () => onResumeAction(m);
     return wrap;
   }
 
@@ -957,42 +966,96 @@ async function send() {
       return;
     }
 
-    if (state.settings.mode === 'roundrobin') {
-      if (rounds === 0) {
-        // 自由讨论：一直轮下去，直到手动停止或触发安全上限
-        let spoken = 0;
-        while (!state.stopRequested && spoken < SAFETY_MAX_SPEAKERS) {
-          for (const m of enabled) {
-            if (state.stopRequested || spoken >= SAFETY_MAX_SPEAKERS) break;
-            await runMember(m);
-            spoken++;
-          }
-        }
-        if (spoken >= SAFETY_MAX_SPEAKERS) {
-          pushSystem(`已达到安全上限（${SAFETY_MAX_SPEAKERS} 次发言），自动停止。`);
-        }
-      } else {
-        for (let r = 0; r < rounds && !state.stopRequested; r++) {
-          for (const m of enabled) {
-            if (state.stopRequested) break;
-            await runMember(m);
-          }
-        }
-      }
-    } else if (state.settings.mode === 'moderator') {
-      await runModerated(rounds, enabled);
-    } else {
-      for (const m of enabled) {
-        if (state.stopRequested) break;
-        await runMember(m);
-      }
-    }
+    await runDiscussion(state.settings.mode, rounds, enabled);
   } catch (e) {
     pushSystem('出错：' + String(e.message || e));
   } finally {
     state.running = false;
     state.stopRequested = false;
     state.currentSearchText = '';
+    $('#btnSend').disabled = false;
+    $('#btnStop').hidden = true;
+    persistChat();
+  }
+}
+
+/**
+ * 执行一轮讨论。
+ * rounds === 0 表示不限轮数，直到手动停止 / 主持人收尾 / 达到安全上限。
+ */
+async function runDiscussion(mode, rounds, enabled) {
+  if (mode === 'roundrobin') {
+    if (rounds === 0) {
+      const cap = safetyCap();
+      let spoken = 0;
+      while (!state.stopRequested && spoken < cap) {
+        for (const m of enabled) {
+          if (state.stopRequested || spoken >= cap) break;
+          await runMember(m);
+          spoken++;
+        }
+      }
+      if (spoken >= cap && !state.stopRequested) {
+        pushContinuePrompt(cap);
+      }
+    } else {
+      for (let r = 0; r < rounds && !state.stopRequested; r++) {
+        for (const m of enabled) {
+          if (state.stopRequested) break;
+          await runMember(m);
+        }
+      }
+    }
+    return;
+  }
+
+  if (mode === 'moderator') {
+    await runModerated(rounds, enabled);
+    return;
+  }
+
+  for (const m of enabled) {
+    if (state.stopRequested) break;
+    await runMember(m);
+  }
+}
+
+/** 到达安全上限时插入一条带「继续」按钮的系统消息 */
+function pushContinuePrompt(cap) {
+  const m = {
+    id: uid(),
+    role: 'system',
+    text: `已达到安全上限（${cap || safetyCap()} 次发言），讨论已暂停。`,
+    action: { label: `继续讨论（再来 ${cap || safetyCap()} 次）` },
+    ts: Date.now(),
+  };
+  state.messages.push(m);
+  $('#messages').appendChild(messageNode(m));
+  $('#messages').scrollTop = $('#messages').scrollHeight;
+  persistChat();
+}
+
+/** 点击「继续讨论」：再给一轮额度继续跑 */
+async function onResumeAction(m) {
+  if (state.running) { pushSystem('正在生成，请先点「停止」'); return; }
+
+  m.action = null;               // 按钮点过就失效，避免重复触发
+  renderMessages();
+
+  const enabled = state.members.filter((x) => x.enabled !== false && x.model && providerOf(x));
+  if (!enabled.length) { pushSystem('没有可用成员'); return; }
+
+  state.running = true;
+  state.stopRequested = false;
+  $('#btnSend').disabled = true;
+  $('#btnStop').hidden = false;
+  try {
+    await runDiscussion(state.settings.mode, 0, enabled);
+  } catch (e) {
+    pushSystem('继续讨论出错：' + String(e.message || e));
+  } finally {
+    state.running = false;
+    state.stopRequested = false;
     $('#btnSend').disabled = false;
     $('#btnStop').hidden = true;
     persistChat();
@@ -1025,8 +1088,9 @@ async function runModerated(rounds, enabled) {
     `主持人：${moderator.name}${unlimited ? '（不限轮数，随时可点「停止」）' : `（最多 ${rounds} 次发言）`}`
   );
 
+  const cap = safetyCap();
   let i = 0;
-  while (!state.stopRequested && (unlimited || i < rounds) && i < SAFETY_MAX_SPEAKERS) {
+  while (!state.stopRequested && (unlimited || i < rounds) && i < cap) {
     const instruction = [
       '现在轮到你当主持人。',
       `可选成员：${names.join('、')}。`,
@@ -1048,8 +1112,8 @@ async function runModerated(rounds, enabled) {
     i++;
   }
 
-  if (i >= SAFETY_MAX_SPEAKERS) {
-    pushSystem(`已达到安全上限（${SAFETY_MAX_SPEAKERS} 次发言），自动停止。`);
+  if (i >= cap && !state.stopRequested) {
+    pushContinuePrompt(cap);
   }
 }
 
@@ -1407,6 +1471,7 @@ function bindEvents() {
   };
 
   $('#kbEnabled').onchange = () => {
+    state.settings.safetyCap = Math.max(1, Number($('#safetyCap').value) || DEFAULT_SAFETY_CAP);
     state.kb.enabled = $('#kbEnabled').checked;
     state.kbCache.clear();
     persistConfig();
@@ -1518,6 +1583,7 @@ function openSettings() {
   $('#modalMember').hidden = true;
   $('#proxy').value = state.proxy || '';
   $('#groupPrompt').value = state.groupPrompt || '';
+  $('#safetyCap').value = safetyCap();
   $('#kbEnabled').checked = state.kb.enabled !== false;
   $('#kbBudget').value = state.kb.budget || 12000;
   renderKbList();
