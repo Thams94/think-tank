@@ -37,7 +37,7 @@ This tool lets you put models from different vendors in the same "group chat" so
 | Multiple providers (own URL + key each) | ✅ | ✅ |
 | Personas / temperature / reasoning effort / max tokens per member | ✅ | ✅ |
 | **Private @** (only you and the mentioned model can see it) | ✅ | ✅ |
-| Three schedulers: manual @ / round-robin / moderator | ✅ | ✅ |
+| Three schedulers: manual @ / round-robin / moderator (rounds 0 = unlimited; moderator selectable and can end the discussion) | ✅ | ✅ |
 | Streaming output + reasoning trace | ✅ | ✅ |
 | **Markdown rendering** (headings, lists, tables, code blocks, links; sanitized) | ✅ | ✅ |
 | Multiple sessions, three-column layout, collapsible sidebars | ✅ | ✅ |

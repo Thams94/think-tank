@@ -417,3 +417,12 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .bubble.md img { max-width: 100%; border-radius: 8px; margin: 6px 0; }
 .bubble.md strong { font-weight: 700; }
 .bubble.md del { color: var(--muted); }
+
+/* ---------- 主持人选择 ---------- */
+.moderator-pick select {
+  width: auto;
+  min-width: 90px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.moderator-pick[hidden] { display: none; }

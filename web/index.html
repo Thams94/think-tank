@@ -55,7 +55,11 @@
         </div>
         <label class="rounds">
           轮数
-          <input type="number" id="rounds" min="1" max="20" value="1" />
+          <input type="number" id="rounds" min="0" max="999" value="1" title="0 = 不限轮数（自由讨论，手动停止）" />
+        </label>
+        <label class="rounds moderator-pick" id="moderatorWrap" hidden>
+          主持
+          <select id="moderatorSelect" title="选择由谁担任主持人"></select>
         </label>
         <label class="rounds inline-toggle" title="开启后每轮先联网搜索一次，结果共享给所有成员">
           <input type="checkbox" id="searchEnabled" /> 🌐 联网

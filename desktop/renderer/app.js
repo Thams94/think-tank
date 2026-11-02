@@ -20,6 +20,8 @@ const state = {
   kbCache: new Map(),
 };
 
+const SAFETY_MAX_SPEAKERS = 200;   // 不限轮数时的硬上限，防止失控烧 token
+
 const $ = (sel) => document.querySelector(sel);
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -360,7 +362,8 @@ function renderAll() {
   renderQuickAt();
   renderMode();
   renderMessages();
-  $('#rounds').value = state.settings.rounds || 1;
+  const rv = state.settings.rounds;
+  $('#rounds').value = (rv === undefined || rv === null || rv === '') ? 1 : rv;
   refreshConnState();
   refreshUsageTotal();
 }
@@ -418,6 +421,31 @@ function insertAt(text) {
   input.focus();
 }
 
+function renderModeratorPick() {
+  const wrap = $('#moderatorWrap');
+  const sel = $('#moderatorSelect');
+  if (!wrap || !sel) return;
+
+  const show = state.settings.mode === 'moderator';
+  wrap.hidden = !show;
+  if (!show) return;
+
+  const list = state.members.filter((m) => m.enabled !== false && m.model);
+  const current = state.settings.moderatorId || (list[0] ? list[0].id : '');
+
+  sel.innerHTML = list.length
+    ? list.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`).join('')
+    : '<option value="">（没有可用成员）</option>';
+
+  if (list.some((m) => m.id === current)) sel.value = current;
+  else if (list[0]) sel.value = list[0].id;
+
+  // 顺手把默认主持人写回设置，避免每次都要手动选一次
+  if (sel.value && state.settings.moderatorId !== sel.value) {
+    state.settings.moderatorId = sel.value;
+  }
+}
+
 function renderMode() {
   for (const btn of document.querySelectorAll('.mode')) {
     btn.classList.toggle('active', btn.dataset.mode === state.settings.mode);
@@ -425,9 +453,13 @@ function renderMode() {
   const hints = {
     manual: '发消息后按 @ 点名；不点名则所有成员依次回答',
     roundrobin: '每个成员轮流回答，轮数可调',
-    moderator: '由一名成员主持，负责决定下一个谁说',
+    moderator: '主持人决定下一个谁说；可选「结束」收尾',
   };
-  $('#modeHint').textContent = hints[state.settings.mode] || '';
+  const rounds = Number(state.settings.rounds) || 0;
+  let hint = hints[state.settings.mode] || '';
+  if (rounds === 0 && state.settings.mode !== 'manual') hint += '（轮数 0 = 不限，直到你点停止）';
+  $('#modeHint').textContent = hint;
+  renderModeratorPick();
 }
 
 function renderMessages() {
@@ -918,7 +950,7 @@ async function send() {
       return;
     }
 
-    const rounds = Math.max(1, Number(state.settings.rounds) || 1);
+    const rounds = Math.max(0, Number(state.settings.rounds) || 0);  // 0 = 不限
 
     if (!enabled.length) {
       pushSystem('没有可用成员：请在成员设置里选择供应商和模型');
@@ -926,10 +958,25 @@ async function send() {
     }
 
     if (state.settings.mode === 'roundrobin') {
-      for (let r = 0; r < rounds && !state.stopRequested; r++) {
-        for (const m of enabled) {
-          if (state.stopRequested) break;
-          await runMember(m);
+      if (rounds === 0) {
+        // 自由讨论：一直轮下去，直到手动停止或触发安全上限
+        let spoken = 0;
+        while (!state.stopRequested && spoken < SAFETY_MAX_SPEAKERS) {
+          for (const m of enabled) {
+            if (state.stopRequested || spoken >= SAFETY_MAX_SPEAKERS) break;
+            await runMember(m);
+            spoken++;
+          }
+        }
+        if (spoken >= SAFETY_MAX_SPEAKERS) {
+          pushSystem(`已达到安全上限（${SAFETY_MAX_SPEAKERS} 次发言），自动停止。`);
+        }
+      } else {
+        for (let r = 0; r < rounds && !state.stopRequested; r++) {
+          for (const m of enabled) {
+            if (state.stopRequested) break;
+            await runMember(m);
+          }
         }
       }
     } else if (state.settings.mode === 'moderator') {
@@ -972,20 +1019,37 @@ async function runModerated(rounds, enabled) {
   const moderator = pickModerator(enabled);
   if (!moderator || !moderator.model) { pushSystem('主持人没有配置模型'); return; }
   const names = enabled.map((m) => m.name);
+  const unlimited = rounds === 0;
 
-  for (let i = 0; i < rounds && !state.stopRequested; i++) {
+  pushSystem(
+    `主持人：${moderator.name}${unlimited ? '（不限轮数，随时可点「停止」）' : `（最多 ${rounds} 次发言）`}`
+  );
+
+  let i = 0;
+  while (!state.stopRequested && (unlimited || i < rounds) && i < SAFETY_MAX_SPEAKERS) {
     const instruction = [
       '现在轮到你当主持人。',
       `可选成员：${names.join('、')}。`,
       '请阅读群聊记录，决定下一个发言者，并给 TA 一句提示。',
-      '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"}',
+      '如果你认为讨论已经充分、可以收尾了，就输出 {"done":true} 来结束讨论。',
+      '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true}',
     ].join('\n');
 
     const plan = parsePlan(await runSilent(moderator, instruction), names);
-    const next = findMember(plan.next) || enabled[i % enabled.length];
 
-    pushSystem(`主持人 ${moderator.name}：请「${next.name}」发言 — ${plan.prompt || '（无提示）'}`);
+    if (plan.done) {
+      pushSystem(`主持人 ${moderator.name} 宣布讨论结束。`);
+      break;
+    }
+
+    const next = findMember(plan.next) || enabled[i % enabled.length];
+    pushSystem(`第 ${i + 1} 次｜主持人 ${moderator.name}：请「${next.name}」发言 — ${plan.prompt || '（无提示）'}`);
     await runMember(next, { extra: plan.prompt ? `【主持人提示】${plan.prompt}` : '' });
+    i++;
+  }
+
+  if (i >= SAFETY_MAX_SPEAKERS) {
+    pushSystem(`已达到安全上限（${SAFETY_MAX_SPEAKERS} 次发言），自动停止。`);
   }
 }
 
@@ -994,9 +1058,12 @@ function parsePlan(text, names) {
     const m = String(text).match(/\{[\s\S]*\}/);
     if (!m) throw new Error('no json');
     const obj = JSON.parse(m[0]);
-    return { next: obj.next || obj.name || '', prompt: obj.prompt || obj.question || '' };
+    const next = String(obj.next || obj.name || '');
+    // 主持人可以用 done:true 或 next:"结束" 来收尾
+    const done = obj.done === true || /^(结束|停止|收尾|end|stop|finish)$/i.test(next);
+    return { done, next, prompt: obj.prompt || obj.question || '' };
   } catch {
-    return { next: names[0] || '', prompt: '' };
+    return { done: false, next: names[0] || '', prompt: '' };
   }
 }
 
@@ -1302,7 +1369,13 @@ function bindEvents() {
   }
 
   $('#rounds').onchange = (e) => {
-    state.settings.rounds = Math.max(1, Number(e.target.value) || 1);
+    state.settings.rounds = Math.max(0, Number(e.target.value) || 0);
+    persistConfig();
+    renderMode();
+  };
+
+  $('#moderatorSelect').onchange = (e) => {
+    state.settings.moderatorId = e.target.value || null;
     persistConfig();
   };
 
