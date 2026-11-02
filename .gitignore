@@ -1,0 +1,30 @@
+# ä¾èµ–ä¸æ„å»ºäº§ç‰©
+node_modules/
+dist/
+release/
+build/
+
+# æµ‹è¯•ä¸ä¸´æ—¶æ–‡ä»¶
+.testfiles/
+.edge-profile/
+.tmp/
+backup/
+*.log
+
+# ç³»ç»Ÿä¸ç¼–è¾‘å™¨
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# æœ¬åœ°é…ç½®ï¼ˆå«å¯†é’¥ï¼Œä»»ä½•æƒ…å†µä¸‹éƒ½ä¸è¦æäº¤ï¼‰
+config.json
+chats.json
+sessions/
+sessions.json
+kb-cache/
+diagnostics.log
+*.7z
+
+# ±¾»ú¿ª·¢½Å±¾£¨Ğ´ËÀ¾ø¶ÔÂ·¾¶£¬²»Í¨ÓÃ£©
+tools/
