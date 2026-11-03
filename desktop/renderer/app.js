@@ -127,6 +127,11 @@ async function init() {
     if (Array.isArray(data.members)) {
       state.members = data.members;
     }
+    if (typeof data.groupPrompt === 'string') {
+      state.groupPrompt = data.groupPrompt;
+    } else if (state.groupPrompt) {
+      saveKbToSession();      // 旧版本升级：把全局提示词并入当前会话
+    }
     if (data.kb && typeof data.kb === 'object') {
       state.kb = Object.assign({ enabled: true, budget: 12000, files: [] }, data.kb);
     } else if (state.kb.files && state.kb.files.length) {
@@ -168,15 +173,25 @@ function persistConfig() {
 let saveTimer = null;
 function persistChat() {
   clearTimeout(saveTimer);
+  // 关键：在"安排保存"的时刻就锁定会话与内容，
+  // 否则 300ms 内切换会话会把 A 的内容写进 B
+  const sessionId = state.activeSessionId;
+  const snapshot = {
+    messages: state.messages,
+    members: state.members,
+    kb: state.kb,
+    groupPrompt: state.groupPrompt,
+  };
   saveTimer = setTimeout(async () => {
-    if (!state.activeSessionId) return;
+    if (!sessionId) return;
     await bridge.saveSession({
-      id: state.activeSessionId,
-      messages: state.messages,
-      members: state.members,
-      kb: state.kb,
+      id: sessionId,
+      messages: snapshot.messages,
+      members: snapshot.members,
+      kb: snapshot.kb,
+      groupPrompt: snapshot.groupPrompt,
     });
-    const s = state.sessions.find((x) => x.id === state.activeSessionId);
+    const s = state.sessions.find((x) => x.id === sessionId);
     if (s) {
       s.messageCount = state.messages.length;
       s.updatedAt = Date.now();
@@ -313,6 +328,7 @@ async function switchSession(id) {
       messages: state.messages,
       members: state.members,
       kb: state.kb,
+      groupPrompt: state.groupPrompt,
     });
   }
   const data = await bridge.loadSession(id);
@@ -322,6 +338,7 @@ async function switchSession(id) {
   if (Array.isArray(data.members)) {
     state.members = data.members;
   }
+  state.groupPrompt = typeof data.groupPrompt === 'string' ? data.groupPrompt : '';
   if (data.kb && typeof data.kb === 'object') {
     state.kb = Object.assign({ enabled: true, budget: 12000, files: [] }, data.kb);
   } else {
@@ -343,6 +360,7 @@ async function newSession() {
   state.activeSessionId = s.id;
   state.messages = [];
   state.members = [];
+  state.groupPrompt = '';
   state.kb = emptyKb;
   state.kbCache.clear();
   renderAll();          // 整页重绘：成员栏、@ 快捷、用量统计一起清空
@@ -500,6 +518,21 @@ function renderMode() {
 function renderMessages() {
   const box = $('#messages');
   box.innerHTML = '';
+
+  if (!state.messages.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.innerHTML = `
+      <div class="big">开始群聊</div>
+      <div class="sub">
+        输入消息并发送。<br>
+        用 <code>@名字</code> 点名某个成员，或 <code>@@名字</code> 私密点名。<br>
+        不点名时，按当前调度模式处理。
+      </div>`;
+    box.appendChild(empty);
+    return;
+  }
+
   for (const m of state.messages) box.appendChild(messageNode(m));
   box.scrollTop = box.scrollHeight;
 }
@@ -803,6 +836,8 @@ async function runMember(member, opts = {}) {
     else msg.error = String(e.message || e);
   } finally {
     offDelta();
+    // rAF 节流可能还没落地最后一帧，结束后强制渲染一次
+    if (msg.text) bubble.innerHTML = mdRender(msg.text);
     state.activeRuns.delete(runId);
     refreshUsageTotal();
     if (msg.truncated || msg.interrupted) {
@@ -974,7 +1009,11 @@ async function send() {
     ts: Date.now(),
   };
   state.messages.push(userMsg);
-  $('#messages').appendChild(messageNode(userMsg));
+  if (state.messages.length === 1) {
+    renderMessages();            // 首条消息：整体重绘，顺便清掉空状态占位
+  } else {
+    $('#messages').appendChild(messageNode(userMsg));
+  }
   $('#input').value = '';
   autoTitle(userMsg.text);
   persistChat();
@@ -1098,6 +1137,11 @@ async function onResumeAction(m) {
 function pushSystem(text) {
   const m = { id: uid(), role: 'system', text, ts: Date.now() };
   state.messages.push(m);
+  if (state.messages.length === 1) {
+    renderMessages();
+    persistChat();
+    return;
+  }
   $('#messages').appendChild(messageNode(m));
   $('#messages').scrollTop = $('#messages').scrollHeight;
   persistChat();
@@ -1486,6 +1530,33 @@ function bindEvents() {
   };
 
   $('#btnSettings').onclick = openSettings;
+  bindContextMenu();
+  $('#btnKb').onclick = openKb;
+  $('#btnGroupPrompt').onclick = openGroupPrompt;
+  $('#btnCancelGroupPrompt').onclick = () => { $('#modalGroupPrompt').hidden = true; };
+  $('#btnSaveGroupPrompt').onclick = saveGroupPrompt;
+  $('#btnCloseKb').onclick = () => { $('#modalKb').hidden = true; };
+  const clearCacheBtn = $('#btnClearKbCache');
+  if (clearCacheBtn) {
+    clearCacheBtn.hidden = typeof bridge.kbClearCache !== 'function';
+    clearCacheBtn.onclick = async () => {
+      const ok = await askUser({ title: '清理解析缓存', message: '会删除已解析的资料文本缓存，之后需要重新添加文件才能再检索。', okText: '清理' });
+      if (!ok) return;
+      try {
+        const r = await bridge.kbClearCache();
+        state.kbCache.clear();
+        pushSystem(`已清理 ${r.removed} 个解析缓存文件。`);
+        await refreshKbCacheInfo();
+      } catch (e) {
+        pushSystem('清理失败：' + String(e.message || e));
+      }
+    };
+  }
+  $('#kbBudget').onchange = () => {
+    state.kb.budget = Math.max(1000, Number($('#kbBudget').value) || 12000);
+    state.kbCache.clear();
+    saveKbToSession();
+  };
   $('#btnNewSession').onclick = newSession;
   $('#btnCollapseSessions').onclick = () => toggleCollapse('sessions');
   $('#btnCollapseMembers').onclick = () => toggleCollapse('members');
@@ -1507,9 +1578,9 @@ function bindEvents() {
   };
 
   $('#kbEnabled').onchange = () => {
-    state.settings.safetyCap = Math.max(1, Number($('#safetyCap').value) || DEFAULT_SAFETY_CAP);
     state.kb.enabled = $('#kbEnabled').checked;
     state.kbCache.clear();
+    renderKbList();
     saveKbToSession();
   };
 
@@ -1541,9 +1612,6 @@ function bindEvents() {
   $('#btnSaveSettings').onclick = async () => {
     const providers = collectProvidersFromDom();
     state.proxy = $('#proxy').value.trim();
-    state.groupPrompt = $('#groupPrompt').value;
-    state.kb.enabled = $('#kbEnabled').checked;
-    state.kb.budget = Math.max(1000, Number($('#kbBudget').value) || 12000);
     state.kbCache.clear();
 
     await bridge.saveConfig({
@@ -1621,12 +1689,18 @@ function saveKbToSession() {
       messages: state.messages,
       members: state.members,
       kb: state.kb,
+      groupPrompt: state.groupPrompt,
     });
   }
   persistConfig();
 }
 
 function renderKbList() {
+  const btn = $('#btnKb');
+  if (btn) {
+    const n = (state.kb.files || []).length;
+    btn.textContent = state.kb.enabled === false ? '📚 知识库(关)' : `📚 知识库${n ? '(' + n + ')' : ''}`;
+  }
   const box = $('#kbList');
   if (!box) return;
   if (!state.kb.files.length) {
@@ -1652,15 +1726,170 @@ function renderKbList() {
   }
 }
 
-function openSettings() {
-  $('#modalMember').hidden = true;
-  $('#proxy').value = state.proxy || '';
+/* 右键菜单 + 关于信息（注入 app.js 的函数块） */
+
+/* ---------- 右键菜单 ---------- */
+function closeCtxMenu() {
+  const m = document.querySelector('.ctx-menu');
+  if (m) m.remove();
+}
+
+function showWebContextMenu(e, { editable, el, hasSelection }) {
+  closeCtxMenu();
+  const items = [];
+
+  if (editable) items.push(['剪切', () => document.execCommand('cut')]);
+  if (editable || hasSelection) items.push(['复制', () => document.execCommand('copy')]);
+  if (editable) items.push(['粘贴', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return;
+      el.focus();
+      const ok = document.execCommand('insertText', false, text);
+      if (!ok) {
+        const start = el.selectionStart == null ? el.value.length : el.selectionStart;
+        const end = el.selectionEnd == null ? start : el.selectionEnd;
+        el.value = el.value.slice(0, start) + text + el.value.slice(end);
+        el.selectionStart = el.selectionEnd = start + text.length;
+      }
+    } catch {
+      pushSystem('浏览器不允许直接读取剪贴板，请用 Ctrl+V 粘贴。');
+    }
+  }]);
+  items.push(['全选', () => {
+    if (el && el.select) { el.focus(); el.select(); } else document.execCommand('selectAll');
+  }]);
+
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  for (const [label, fn] of items) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.onclick = () => { closeCtxMenu(); fn(); };
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+
+  const pad = 6;
+  const rect = menu.getBoundingClientRect();
+  let x = e.clientX;
+  let y = e.clientY;
+  if (x + rect.width + pad > window.innerWidth) x = window.innerWidth - rect.width - pad;
+  if (y + rect.height + pad > window.innerHeight) y = window.innerHeight - rect.height - pad;
+  menu.style.left = Math.max(pad, x) + 'px';
+  menu.style.top = Math.max(pad, y) + 'px';
+}
+
+function bindContextMenu() {
+  document.addEventListener('contextmenu', (e) => {
+    const el = e.target;
+    const editable = !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT');
+    const sel = window.getSelection();
+    const hasSelection = !!(sel && String(sel).length > 0);
+    if (!editable && !hasSelection) return;
+
+    e.preventDefault();
+    if (typeof bridge.showContextMenu === 'function') {
+      bridge.showContextMenu({ editable, hasSelection });
+    } else {
+      showWebContextMenu(e, { editable, el, hasSelection });
+    }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Element) || !e.target.closest('.ctx-menu')) closeCtxMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeCtxMenu();
+  });
+  window.addEventListener('blur', closeCtxMenu);
+}
+
+/* ---------- 关于信息 ---------- */
+let appInfoCache = null;
+
+async function loadAppInfo() {
+  try {
+    appInfoCache = typeof bridge.appInfo === 'function'
+      ? await bridge.appInfo()
+      : { version: '—', engine: '', releases: 'https://github.com/Thams94/ai-group-chat/releases/latest' };
+  } catch {
+    appInfoCache = { version: '—', engine: '', releases: '' };
+  }
+
+  const v = $('#appVersion');
+  if (v) v.textContent = appInfoCache.version || '—';
+
+  const eng = $('#engineVersion');
+  if (eng) {
+    const label = appInfoCache.electron ? `Electron ${appInfoCache.electron}` : (appInfoCache.engine || '');
+    eng.textContent = label ? '· ' + label : '';
+  }
+
+  const link = $('#linkUpdate');
+  if (link) {
+    link.onclick = (e) => {
+      e.preventDefault();
+      if (!appInfoCache.releases) return;
+      if (typeof bridge.openExternal === 'function') bridge.openExternal(appInfoCache.releases);
+      else window.open(appInfoCache.releases, '_blank', 'noopener');
+    };
+  }
+
+  const row = $('#dataDirRow');
+  const dirPath = $('#dataDirPath');
+  const openBtn = $('#btnOpenDataDir');
+  if (row && dirPath) {
+    if (appInfoCache.dataDir) {
+      row.hidden = false;
+      dirPath.textContent = appInfoCache.dataDir;
+      dirPath.title = appInfoCache.dataDir;
+      if (openBtn) openBtn.onclick = () => bridge.openPath(appInfoCache.dataDir);
+    } else {
+      row.hidden = true;
+    }
+  }
+}
+
+function openGroupPrompt() {
   $('#groupPrompt').value = state.groupPrompt || '';
-  $('#safetyCap').value = safetyCap();
+  $('#modalGroupPrompt').hidden = false;
+  $('#groupPrompt').focus();
+}
+
+function saveGroupPrompt() {
+  state.groupPrompt = $('#groupPrompt').value;
+  $('#modalGroupPrompt').hidden = true;
+  saveKbToSession();          // 复用：把会话内容整体落盘（含成员/知识库/提示词）
+  pushSystem(state.groupPrompt ? '已更新当前会话的群组提示词。' : '已清空当前会话的群组提示词。');
+}
+
+async function openKb() {
   $('#kbEnabled').checked = state.kb.enabled !== false;
   $('#kbBudget').value = state.kb.budget || 12000;
   renderKbList();
+  $('#modalKb').hidden = false;
+  await refreshKbCacheInfo();
+}
+
+async function refreshKbCacheInfo() {
+  const el = $('#kbCacheInfo');
+  if (!el || typeof bridge.kbCacheInfo !== 'function') return;
+  try {
+    const info = await bridge.kbCacheInfo();
+    el.textContent = `解析缓存：${info.count} 个文件，${(info.bytes / 1024).toFixed(0)} KB`;
+  } catch {
+    el.textContent = '解析缓存：不可用';
+  }
+}
+
+function openSettings() {
+  $('#modalMember').hidden = true;
+  $('#proxy').value = state.proxy || '';
+  $('#safetyCap').value = safetyCap();
   renderProviders();
+  loadAppInfo();
   $('#modalSettings').hidden = false;
 }
 

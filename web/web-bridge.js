@@ -200,7 +200,7 @@
     return { sessions: idx.sessions, activeId: idx.activeId };
   }
 
-  async function createSession(title, members, kb) {
+  async function createSession(title, members, kb, groupPrompt) {
     const idx = await getIndex();
     const id = uid();
     const t = (title || '').trim() || '新会话';
@@ -208,12 +208,13 @@
     const kbSnapshot = (kb && typeof kb === 'object')
       ? JSON.parse(JSON.stringify(kb))
       : { enabled: true, budget: 12000, files: [] };
-    const data = { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, createdAt: Date.now(), updatedAt: Date.now() };
+    const gp = typeof groupPrompt === 'string' ? groupPrompt : '';
+    const data = { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: gp, createdAt: Date.now(), updatedAt: Date.now() };
     await idbPut('sessions', data);
     idx.sessions.unshift({ id, title: t, messageCount: 0, createdAt: data.createdAt, updatedAt: data.updatedAt });
     idx.activeId = id;
     await putIndex(idx);
-    return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot };
+    return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: gp };
   }
 
   async function loadSession(id) {
@@ -225,7 +226,7 @@
     return s;
   }
 
-  async function saveSession({ id, messages, title, members, kb }) {
+  async function saveSession({ id, messages, title, members, kb, groupPrompt }) {
     const old = (await idbGet('sessions', id)) || { id, title: '新会话', messages: [] };
     const data = {
       id,
@@ -233,6 +234,7 @@
       messages: Array.isArray(messages) ? messages : old.messages,
       members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (old.members || []),
       kb: (kb && typeof kb === 'object') ? JSON.parse(JSON.stringify(kb)) : (old.kb || { enabled: true, budget: 12000, files: [] }),
+      groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : (old.groupPrompt || ''),
       createdAt: old.createdAt || Date.now(),
       updatedAt: Date.now(),
     };
@@ -311,24 +313,33 @@
       while ((idx = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 1);
-        if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') { sawDone = true; continue; }
-        let json;
-        try { json = JSON.parse(payload); } catch { continue; }
+        handleLine(line);
+      }
+    }
 
-        if (json.usage) {
-          usage = json.usage;
-          emitDelta({ runId, type: 'usage', usage });
-        }
-        const choice = json.choices && json.choices[0];
-        if (choice && choice.finish_reason) finishReason = choice.finish_reason;
-        const delta = (choice && choice.delta) || {};
-        if (delta.reasoning_content) emitDelta({ runId, type: 'reasoning', text: delta.reasoning_content });
-        if (delta.content) {
-          full += delta.content;
-          emitDelta({ runId, type: 'content', text: delta.content });
-        }
+    // 流结束时的残余数据（最后一行通常没有换行）
+    if (buffer.trim()) handleLine(buffer.trim());
+    buffer = '';
+
+    function handleLine(line) {
+      if (!line.startsWith('data:')) return;
+      const payload = line.slice(5).trim();
+      if (!payload) return;
+      if (payload === '[DONE]') { sawDone = true; return; }
+      let json;
+      try { json = JSON.parse(payload); } catch { return; }
+
+      if (json.usage) {
+        usage = json.usage;
+        emitDelta({ runId, type: 'usage', usage });
+      }
+      const choice = json.choices && json.choices[0];
+      if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+      const delta = (choice && choice.delta) || {};
+      if (delta.reasoning_content) emitDelta({ runId, type: 'reasoning', text: delta.reasoning_content });
+      if (delta.content) {
+        full += delta.content;
+        emitDelta({ runId, type: 'content', text: delta.content });
       }
     }
 
@@ -722,7 +733,7 @@
 
     const imagePayload = [];
     if (wantImages) {
-      for (const f of images.slice(0, 6)) {
+      for (const f of images.slice(0, 10)) {
         const file = fileMap.get(f.path);
         if (!file) { skipped++; continue; }
         try {
@@ -936,7 +947,22 @@
 
   /* ================= 暴露 ================= */
 
+  const APP_VERSION = '0.4.6';
+  const REPO = 'https://github.com/Thams94/ai-group-chat';
+
   window.api = {
+    appInfo: async () => ({
+      version: APP_VERSION,
+      engine: '浏览器版',
+      releases: REPO + '/releases/latest',
+      repo: REPO,
+      dataDir: null,
+    }),
+    openExternal: async (url) => {
+      if (!/^https:\/\/github\.com\/Thams94\//.test(String(url || ''))) return { ok: false };
+      window.open(url, '_blank', 'noopener');
+      return { ok: true };
+    },
     getConfig, saveConfig,
     listModels,
     run, abort, onDelta,

@@ -152,6 +152,9 @@ function loadConfig() {
     persona: m.persona || '',
     temp: typeof m.temp === 'number' ? m.temp : 0.7,
     color: m.color || '#5b8def',
+    maxTokens: Number(m.maxTokens) || 0,
+    reasoning: m.reasoning || 'off',
+    supportsImages: Boolean(m.supportsImages),
     enabled: m.enabled !== false,
   }));
 
@@ -276,29 +279,40 @@ async function readStream(res, onDelta) {
     while ((idx = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') { sawDone = true; continue; }
-      try {
-        const json = JSON.parse(payload);
-        if (json.usage) {
-          usage = json.usage;
-          onDelta({ type: 'usage', usage: json.usage });
-        }
-        const choice = json.choices?.[0];
-        if (choice && choice.finish_reason) finishReason = choice.finish_reason;
-        const delta = choice?.delta || {};
-        if (delta.reasoning_content) {
-          reasoningChars += delta.reasoning_content.length;
-          onDelta({ type: 'reasoning', text: delta.reasoning_content });
-        }
-        if (delta.content) {
-          full += delta.content;
-          onDelta({ type: 'content', text: delta.content });
-        }
-      } catch {
-        /* 忽略解析失败的行 */
+      handleLine(line);
+    }
+  }
+
+  // 流结束时最后一条可能没有换行结尾，补处理一次，避免丢内容或丢 usage
+  if (buffer.trim()) handleLine(buffer.trim());
+  buffer = '';
+
+  function handleLine(line) {
+    if (!line.startsWith('data:')) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') {
+      if (payload === '[DONE]') sawDone = true;
+      return;
+    }
+    try {
+      const json = JSON.parse(payload);
+      if (json.usage) {
+        usage = json.usage;
+        onDelta({ type: 'usage', usage: json.usage });
       }
+      const choice = json.choices?.[0];
+      if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+      const delta = choice?.delta || {};
+      if (delta.reasoning_content) {
+        reasoningChars += delta.reasoning_content.length;
+        onDelta({ type: 'reasoning', text: delta.reasoning_content });
+      }
+      if (delta.content) {
+        full += delta.content;
+        onDelta({ type: 'content', text: delta.content });
+      }
+    } catch {
+      /* 忽略解析失败的行 */
     }
   }
   // 没收到 finish_reason 且没收到 [DONE]，说明流被中途掐断了
@@ -408,6 +422,9 @@ ipcMain.handle('config:save', (_e, patch) => {
       persona: m.persona || '',
       temp: typeof m.temp === 'number' ? m.temp : 0.7,
       color: m.color || '#5b8def',
+      maxTokens: Number(m.maxTokens) || 0,
+      reasoning: m.reasoning || 'off',
+      supportsImages: Boolean(m.supportsImages),
       enabled: m.enabled !== false,
     }));
   }
@@ -741,20 +758,107 @@ async function pickKbChunks(docs, query, budget) {
   };
 }
 
+const PARSE_TIMEOUT_MS = 60000;
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} 解析超时（>${Math.round(ms / 1000)}s）`)), ms)),
+  ]);
+}
+
 async function kbEnsureCache(entry) {
   const cp = cachePath(entry.path);
   if (fs.existsSync(cp)) return fs.readFileSync(cp, 'utf8');
 
   let text = '';
   if (entry.kind === 'image') {
-    text = await ocrImage(entry.path);
+    text = await withTimeout(ocrImage(entry.path), PARSE_TIMEOUT_MS, '图片识别');
   } else {
-    text = await extractText(entry.path);
+    text = await withTimeout(extractText(entry.path), PARSE_TIMEOUT_MS, '文档');
   }
   fs.mkdirSync(KB_CACHE_DIR, { recursive: true });
   fs.writeFileSync(cp, text, 'utf8');
   return text;
 }
+
+
+ipcMain.handle('kb:cacheInfo', () => {
+  let bytes = 0;
+  let count = 0;
+  try {
+    for (const f of fs.readdirSync(KB_CACHE_DIR)) {
+      try {
+        bytes += fs.statSync(path.join(KB_CACHE_DIR, f)).size;
+        count++;
+      } catch { /* 忽略 */ }
+    }
+  } catch { /* 目录不存在 */ }
+  return { count, bytes, dir: KB_CACHE_DIR };
+});
+
+ipcMain.handle('kb:clearCache', () => {
+  let removed = 0;
+  try {
+    for (const f of fs.readdirSync(KB_CACHE_DIR)) {
+      try {
+        fs.unlinkSync(path.join(KB_CACHE_DIR, f));
+        removed++;
+      } catch { /* 忽略单文件 */ }
+    }
+  } catch { /* 目录不存在 */ }
+  chunkCache.clear();
+  return { removed };
+});
+
+
+/* ---------- 右键菜单 ---------- */
+ipcMain.on('menu:context', (e, opts = {}) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win) return;
+
+  const items = [];
+  if (opts.editable) {
+    items.push({ role: 'undo', label: '撤销' });
+    items.push({ role: 'redo', label: '重做' });
+    items.push({ type: 'separator' });
+    items.push({ role: 'cut', label: '剪切' });
+  }
+  items.push({ role: 'copy', label: '复制' });
+  if (opts.editable) items.push({ role: 'paste', label: '粘贴' });
+  items.push({ type: 'separator' });
+  items.push({ role: 'selectAll', label: '全选' });
+
+  Menu.buildFromTemplate(items).popup({ window: win });
+});
+
+/* ---------- 应用信息 ---------- */
+ipcMain.handle('app:info', () => ({
+  version: app.getVersion(),
+  electron: process.versions.electron,
+  chrome: process.versions.chrome,
+  node: process.versions.node,
+  platform: process.platform,
+  arch: process.arch,
+  dataDir: USER_DIR,
+  repo: 'https://github.com/Thams94/ai-group-chat',
+  releases: 'https://github.com/Thams94/ai-group-chat/releases/latest',
+}));
+
+ipcMain.handle('app:openPath', (_e, target) => {
+  const allowed = [USER_DIR];
+  const t = String(target || '');
+  if (!allowed.some((a) => t === a || t.startsWith(a + path.sep))) return { ok: false, error: '不允许打开该路径' };
+  shell.openPath(t);
+  return { ok: true };
+});
+
+ipcMain.handle('app:openExternal', (_e, url) => {
+  const u = String(url || '');
+  if (!/^https:\/\/github\.com\/Thams94\//.test(u)) return { ok: false, error: '只允许打开项目相关链接' };
+  shell.openExternal(u);
+  return { ok: true };
+});
 
 ipcMain.handle('kb:pick', async () => {
   const win = BrowserWindow.getAllWindows()[0] || null;
@@ -771,20 +875,74 @@ ipcMain.handle('kb:pick', async () => {
   try {
     if (win && !win.isDestroyed()) { win.show(); win.focus(); win.webContents.focus(); }
   } catch { /* 忽略 */ }
-  return r.canceled ? [] : r.filePaths;
+  if (r.canceled) return [];
+  for (const f of r.filePaths) approvePath(f);
+  return r.filePaths;
 });
 
+
+
+/* ---------- 知识库路径授权 ----------
+ * 渲染进程只能索引"用户通过对话框/扫描得到的路径"，
+ * 避免 IPC 被用来读取任意文件。授权记录持久化，重启后仍有效。
+ */
+const KB_APPROVED_FILE = path.join(USER_DIR, 'kb-approved.json');
+let kbApprovedRoots = new Set();
+
+function loadApproved() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(KB_APPROVED_FILE, 'utf8'));
+    if (Array.isArray(arr)) kbApprovedRoots = new Set(arr);
+  } catch { /* 首次运行 */ }
+  return kbApprovedRoots;
+}
+
+function saveApproved() {
+  try {
+    fs.writeFileSync(KB_APPROVED_FILE, JSON.stringify([...kbApprovedRoots], null, 2), 'utf8');
+  } catch { /* 忽略 */ }
+}
+
+function realOrResolve(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+
+function approvePath(p) {
+  if (!p) return;
+  const abs = realOrResolve(p);
+  kbApprovedRoots.add(abs);
+  saveApproved();
+}
+
+function isApprovedPath(p) {
+  if (!p) return false;
+  const abs = realOrResolve(p);
+  for (const root of kbApprovedRoots) {
+    if (abs === root) return true;
+    const rel = path.relative(root, abs);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+  }
+  return false;
+}
+
+loadApproved();
 
 /** 递归扫描目录，返回可读文档路径（带数量/深度限制，跳过依赖与隐藏目录） */
 function scanFolder(root) {
   const SKIP_DIRS = new Set([
     'node_modules', '.git', '.svn', 'dist', 'build', 'out', 'release', 'target',
     '__pycache__', '.venv', 'venv', '.cache', '.idea', '.vscode', 'coverage',
+    // 第三方库与运行时数据：不属于项目自有代码，一并跳过
+    'vendor', 'third_party', 'vendor.js', 'assets', 'kb-cache', 'sessions',
+    'backup', 'test', 'tests', '__tests__', 'tools',
   ]);
   const LIMIT = { files: 800, depth: 8, sizeBytes: 20 * 1024 * 1024 };
 
   const out = [];
+  const images = [];
   let truncated = false;
+
+  const realRoot = realOrResolve(root);
 
   function walk(dir, depth) {
     if (out.length >= LIMIT.files) { truncated = true; return; }
@@ -803,15 +961,28 @@ function scanFolder(root) {
       if (name.startsWith('.')) continue;
 
       const full = path.join(dir, name);
+
+      // 不跟随符号链接 / Windows junction，避免越出所选目录
+      if (ent.isSymbolicLink()) continue;
+
       if (ent.isDirectory()) {
         if (SKIP_DIRS.has(name)) continue;
+        // 双重保险：递归前验证真实路径仍在根目录内
+        const real = realOrResolve(full);
+        const rel = path.relative(realRoot, real);
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
         walk(full, depth + 1);
         continue;
       }
       if (!ent.isFile()) continue;
 
       const ext = path.extname(name).toLowerCase();
-      if (!TEXT_EXTS.has(ext) && ext !== '.pdf' && ext !== '.docx') continue;
+      const isDoc = TEXT_EXTS.has(ext) || ext === '.pdf' || ext === '.docx';
+      const isImage = IMAGE_EXTS.has(ext);
+      if (!isDoc && !isImage) continue;
+      // 图片单独限流：一次最多 40 张，避免误选图片素材目录
+      if (isImage && images.length >= 40) continue;
+      if (isImage) { images.push(full); continue; }
 
       try {
         const st = fs.statSync(full);
@@ -824,7 +995,11 @@ function scanFolder(root) {
   }
 
   walk(root, 0);
-  return { paths: out, truncated };
+  // 用户明确选择了这个目录，扫描结果视为已授权
+  approvePath(root);
+  for (const f of out) approvePath(path.dirname(f));
+  for (const f of images) approvePath(path.dirname(f));
+  return { paths: out.concat(images), truncated, imageCount: images.length };
 }
 
 ipcMain.handle('kb:scanFolder', (_e, dir) => {
@@ -855,9 +1030,29 @@ ipcMain.handle('kb:pickFolder', async () => {
 ipcMain.handle('kb:index', async (_e, paths) => {
   const out = [];
   for (const p of paths || []) {
+    if (!isApprovedPath(p)) {
+      out.push({ path: p, name: path.basename(p), kind: 'doc', ok: false, chars: 0, error: '未授权的路径，请重新选择文件' });
+      continue;
+    }
     const ext = path.extname(p).toLowerCase();
     const kind = IMAGE_EXTS.has(ext) ? 'image' : 'doc';
     const entry = { path: p, name: path.basename(p), kind };
+
+    // 图片不在导入时解析：视觉模型直接看图；需要 OCR 时在组装上下文阶段按需转写
+    if (kind === 'image') {
+      try {
+        const st = fs.statSync(p);
+        entry.bytes = st.size;
+        entry.ok = true;
+        entry.chars = 0;
+      } catch (e) {
+        entry.ok = false;
+        entry.error = String(e.message || e);
+      }
+      out.push(entry);
+      continue;
+    }
+
     try {
       const text = await kbEnsureCache(entry);
       entry.chars = text.length;
@@ -878,8 +1073,9 @@ ipcMain.handle('kb:index', async (_e, paths) => {
  * wantImages: 成员是否支持看图（支持则返回图片，交给模型直接看）
  */
 ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false, query = '' }) => {
-  const docs = (files || []).filter((f) => f.kind !== 'image');
-  const images = (files || []).filter((f) => f.kind === 'image');
+  const safeFiles = (files || []).filter((f) => isApprovedPath(f.path));
+  const docs = safeFiles.filter((f) => f.kind !== 'image');
+  const images = safeFiles.filter((f) => f.kind === 'image');
 
   const parts = [];
   let used = 0;
@@ -896,7 +1092,7 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
   // 图片：给视觉模型直接看（最多 6 张，避免请求过大）
   const imagePayload = [];
   if (wantImages) {
-    for (const f of images.slice(0, 6)) {
+    for (const f of images.slice(0, 10)) {
       try {
         const buf = fs.readFileSync(f.path);
         const mime = f.path.toLowerCase().endsWith('.png') ? 'image/png'
@@ -986,7 +1182,7 @@ ipcMain.handle('sessions:list', () => {
   return { sessions: idx.sessions, activeId: idx.activeId };
 });
 
-ipcMain.handle('sessions:create', (_e, title, members, kb) => {
+ipcMain.handle('sessions:create', (_e, title, members, kb, groupPrompt) => {
   const idx = loadSessionIndex();
   const id = newId();
   const t = (title || '').trim() || '新会话';
@@ -994,11 +1190,14 @@ ipcMain.handle('sessions:create', (_e, title, members, kb) => {
   const kbSnapshot = kb && typeof kb === 'object'
     ? JSON.parse(JSON.stringify(kb))
     : { enabled: true, budget: 12000, files: [] };
-  writeJson(sessionPath(id), { id, title: t, messages: [], members: snapshot, kb: kbSnapshot });
+  writeJson(sessionPath(id), {
+    id, title: t, messages: [], members: snapshot, kb: kbSnapshot,
+    groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : '',
+  });
   idx.sessions.unshift({ id, title: t, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 });
   idx.activeId = id;
   saveSessionIndex(idx);
-  return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot };
+  return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : '' };
 });
 
 ipcMain.handle('sessions:load', (_e, id) => {
@@ -1010,7 +1209,7 @@ ipcMain.handle('sessions:load', (_e, id) => {
   return file;
 });
 
-ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb }) => {
+ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt }) => {
   const idx = loadSessionIndex();
   const existing = readJson(sessionPath(id), { id, title: '新会话', messages: [] });
   const data = {
@@ -1021,6 +1220,7 @@ ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb }) => {
     kb: (kb && typeof kb === 'object')
       ? JSON.parse(JSON.stringify(kb))
       : (existing.kb || { enabled: true, budget: 12000, files: [] }),
+    groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : (existing.groupPrompt || ''),
     savedAt: Date.now(),
   };
   writeJson(sessionPath(id), data);

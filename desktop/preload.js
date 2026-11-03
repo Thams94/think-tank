@@ -14,15 +14,23 @@ contextBridge.exposeInMainWorld('api', {
   webSearch: (payload) => ipcRenderer.invoke('websearch:run', payload),
 
   // 知识库
+  // 系统交互
+  showContextMenu: (opts) => ipcRenderer.send('menu:context', opts),
+  appInfo: () => ipcRenderer.invoke('app:info'),
+  openPath: (p) => ipcRenderer.invoke('app:openPath', p),
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+
   kbPick: () => ipcRenderer.invoke('kb:pick'),
   kbPickFolder: () => ipcRenderer.invoke('kb:pickFolder'),
   kbScanFolder: (dir) => ipcRenderer.invoke('kb:scanFolder', dir),
+  kbCacheInfo: () => ipcRenderer.invoke('kb:cacheInfo'),
+  kbClearCache: () => ipcRenderer.invoke('kb:clearCache'),
   kbIndex: (paths) => ipcRenderer.invoke('kb:index', paths),
   kbContext: (payload) => ipcRenderer.invoke('kb:context', payload),
 
   // 会话
   listSessions: () => ipcRenderer.invoke('sessions:list'),
-  createSession: (title, members, kb) => ipcRenderer.invoke('sessions:create', title, members, kb),
+  createSession: (title, members, kb, groupPrompt) => ipcRenderer.invoke('sessions:create', title, members, kb, groupPrompt),
   loadSession: (id) => ipcRenderer.invoke('sessions:load', id),
   saveSession: (payload) => ipcRenderer.invoke('sessions:save', payload),
   renameSession: (payload) => ipcRenderer.invoke('sessions:rename', payload),

@@ -40,9 +40,9 @@
 | 三种调度：手动 @ / 轮流 / 主持人（轮数 0 = 不限；主持人可选且能宣布结束；到上限可点「继续」） | ✅ | ✅ |
 | 流式输出 + 思考过程 | ✅ | ✅ |
 | **Markdown 渲染**（标题/列表/表格/代码块/链接，带 XSS 过滤） | ✅ | ✅ |
-| 多会话 + 三栏 + 侧栏收起（成员按会话独立保存，新建会话从空开始） | ✅ | ✅ |
+| 多会话 + 三栏（成员 / 知识库 / 群组提示词都按会话隔离） | ✅ | ✅ |
 | 停止 / 继续生成 / 重新生成 / 编辑 | ✅ | ✅ |
-| 本地知识库（PDF / Word / TXT，按会话隔离，关键词检索注入） | ✅ 多选文件 | ✅ 文件 + **文件夹扫描** |
+| 本地知识库（PDF / Word / TXT，按会话隔离，关键词检索注入） | ✅ 多选文件 | ✅ 文件 + 文件夹扫描 |
 | 知识库图片 | ✅ 视觉模型或转写 | ✅ 视觉模型或系统 OCR |
 | 联网搜索 | ✅ | ✅ |
 | 导出 Markdown | ✅ | ✅ |
@@ -68,7 +68,7 @@ npm install
 npm start
 ```
 
-或直接下载安装包：[AIGroupChat-Setup-0.3.8.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.3.8/AIGroupChat-Setup-0.3.8.exe)（102 MB，Windows）
+或直接下载安装包：[AIGroupChat-Setup-0.4.7.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.4.7/AIGroupChat-Setup-0.4.7.exe)（102 MB，Windows）
 
 ### 配置
 
