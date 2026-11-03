@@ -610,6 +610,137 @@ async function ocrImage(filePath) {
   });
 }
 
+
+/* ---------- 知识库检索 ---------- */
+
+const CHUNK_SIZE = 800;
+const CHUNK_OVERLAP = 120;
+const chunkCache = new Map();   // path -> { mtime, chunks: string[] }
+
+/** 按长度切块，尽量在换行处断开 */
+function splitChunks(text) {
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(text.length, i + CHUNK_SIZE);
+    if (end < text.length) {
+      const nl = text.lastIndexOf('\n', end);
+      if (nl > i + CHUNK_SIZE * 0.5) end = nl;
+    }
+    chunks.push(text.slice(i, end));
+    if (end >= text.length) break;
+    i = Math.max(end - CHUNK_OVERLAP, i + 1);
+  }
+  return chunks;
+}
+
+/** 中文按二元组、英文按单词切分查询词 */
+function queryTerms(query) {
+  const q = String(query || '').toLowerCase();
+  const terms = new Set();
+  for (const m of q.matchAll(/[a-z0-9_]{2,}/g)) terms.add(m[0]);
+  for (const seg of q.replace(/[^\u4e00-\u9fa5]+/g, ' ').split(/\s+/)) {
+    if (seg.length === 1) terms.add(seg);
+    for (let i = 0; i + 1 < seg.length; i++) terms.add(seg.slice(i, i + 2));
+  }
+  return [...terms].filter(Boolean).slice(0, 60);
+}
+
+function scoreChunk(chunk, terms) {
+  if (!terms.length) return 0;
+  const low = chunk.toLowerCase();
+  let score = 0;
+  for (const t of terms) {
+    let idx = 0;
+    let hits = 0;
+    while ((idx = low.indexOf(t, idx)) >= 0 && hits < 12) {
+      hits++;
+      idx += t.length;
+    }
+    if (hits) score += hits * (t.length >= 2 ? 1 : 0.4);
+  }
+  return score;
+}
+
+async function docChunks(entry) {
+  const cached = chunkCache.get(entry.path);
+  try {
+    const st = fs.statSync(entry.path);
+    if (cached && cached.mtime === st.mtimeMs) return cached.chunks;
+  } catch { /* 文件可能被删，用缓存 */ }
+
+  let text = await kbEnsureCache(entry);
+  text = String(text).replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const chunks = splitChunks(text);
+  chunkCache.set(entry.path, { mtime: Date.now(), chunks });
+  return chunks;
+}
+
+/**
+ * 从知识库里挑最相关的片段。
+ * 有 query 就按关键词打分排序；没有 query 就按原顺序取前几块。
+ */
+async function pickKbChunks(docs, query, budget) {
+  const terms = queryTerms(query);
+  const scored = [];
+  let skipped = 0;
+
+  for (const f of docs) {
+    let chunks;
+    try {
+      chunks = await docChunks(f);
+    } catch {
+      skipped++;
+      continue;
+    }
+    if (!chunks.length) { skipped++; continue; }
+
+    chunks.forEach((chunk, idx) => {
+      scored.push({ file: f.name, idx, chunk, score: scoreChunk(chunk, terms) });
+    });
+  }
+
+  if (!scored.length) return { parts: [], used: 0, skipped, matched: 0, total: 0 };
+
+  const total = scored.length;
+  let picked;
+
+  if (terms.length) {
+    const hits = scored.filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+    // 有命中就用命中的；一个都没命中时退回原文前几块
+    picked = hits.length ? hits : scored.slice(0, 12);
+  } else {
+    picked = scored.slice(0, 12);
+  }
+
+  const parts = [];
+  let used = 0;
+  const seenFiles = new Set();
+
+  for (const item of picked) {
+    const block = `【${item.file}】\n${item.chunk.trim()}`;
+    if (used + block.length > budget) {
+      const remain = budget - used;
+      if (remain < 200) break;
+      parts.push(block.slice(0, remain));
+      used += remain;
+      break;
+    }
+    parts.push(block);
+    used += block.length;
+    seenFiles.add(item.file);
+  }
+
+  return {
+    parts,
+    used,
+    skipped,
+    matched: picked.filter((x) => x.score > 0).length,
+    total,
+    filesUsed: seenFiles.size,
+  };
+}
+
 async function kbEnsureCache(entry) {
   const cp = cachePath(entry.path);
   if (fs.existsSync(cp)) return fs.readFileSync(cp, 'utf8');
@@ -643,6 +774,84 @@ ipcMain.handle('kb:pick', async () => {
   return r.canceled ? [] : r.filePaths;
 });
 
+
+/** 递归扫描目录，返回可读文档路径（带数量/深度限制，跳过依赖与隐藏目录） */
+function scanFolder(root) {
+  const SKIP_DIRS = new Set([
+    'node_modules', '.git', '.svn', 'dist', 'build', 'out', 'release', 'target',
+    '__pycache__', '.venv', 'venv', '.cache', '.idea', '.vscode', 'coverage',
+  ]);
+  const LIMIT = { files: 800, depth: 8, sizeBytes: 20 * 1024 * 1024 };
+
+  const out = [];
+  let truncated = false;
+
+  function walk(dir, depth) {
+    if (out.length >= LIMIT.files) { truncated = true; return; }
+    if (depth > LIMIT.depth) return;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const ent of entries) {
+      if (out.length >= LIMIT.files) { truncated = true; return; }
+      const name = ent.name;
+      if (name.startsWith('.')) continue;
+
+      const full = path.join(dir, name);
+      if (ent.isDirectory()) {
+        if (SKIP_DIRS.has(name)) continue;
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!ent.isFile()) continue;
+
+      const ext = path.extname(name).toLowerCase();
+      if (!TEXT_EXTS.has(ext) && ext !== '.pdf' && ext !== '.docx') continue;
+
+      try {
+        const st = fs.statSync(full);
+        if (st.size > LIMIT.sizeBytes) continue;
+      } catch {
+        continue;
+      }
+      out.push(full);
+    }
+  }
+
+  walk(root, 0);
+  return { paths: out, truncated };
+}
+
+ipcMain.handle('kb:scanFolder', (_e, dir) => {
+  const target = String(dir || '').trim();
+  if (!target) return { paths: [], truncated: false, error: '空路径' };
+  try {
+    const st = fs.statSync(target);
+    if (!st.isDirectory()) return { paths: [], truncated: false, error: '不是文件夹' };
+  } catch (err) {
+    return { paths: [], truncated: false, error: '路径不存在：' + target };
+  }
+  return scanFolder(target);
+});
+
+ipcMain.handle('kb:pickFolder', async () => {
+  const win = BrowserWindow.getAllWindows()[0] || null;
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择知识库文件夹（会递归扫描其中的文档）',
+    properties: ['openDirectory'],
+  });
+  try {
+    if (win && !win.isDestroyed()) { win.show(); win.focus(); win.webContents.focus(); }
+  } catch { /* 忽略 */ }
+  if (r.canceled || !r.filePaths.length) return { paths: [], truncated: false };
+  return scanFolder(r.filePaths[0]);
+});
+
 ipcMain.handle('kb:index', async (_e, paths) => {
   const out = [];
   for (const p of paths || []) {
@@ -668,7 +877,7 @@ ipcMain.handle('kb:index', async (_e, paths) => {
  * budget: 允许注入的最大字符数（约等于 tokens * 1.5 的中文比例，粗算即可）
  * wantImages: 成员是否支持看图（支持则返回图片，交给模型直接看）
  */
-ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false }) => {
+ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false, query = '' }) => {
   const docs = (files || []).filter((f) => f.kind !== 'image');
   const images = (files || []).filter((f) => f.kind === 'image');
 
@@ -676,23 +885,11 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
   let used = 0;
   let skipped = 0;
 
-  for (const f of docs) {
-    try {
-      let text = await kbEnsureCache(f);
-      text = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-      if (!text) { skipped++; continue; }
-
-      const remain = budget - used;
-      if (remain <= 200) { skipped++; continue; }
-
-      const slice = text.slice(0, remain);
-      const cut = slice.length < text.length;
-      parts.push(`【资料：${f.name}】\n${slice}${cut ? '\n…（内容过长已截断）' : ''}`);
-      used += slice.length;
-    } catch (e) {
-      skipped++;
-    }
-  }
+  // 按查询关键词检索最相关的片段
+  const picked = await pickKbChunks(docs, query, budget);
+  parts.push(...picked.parts);
+  used += picked.used;
+  skipped += picked.skipped;
 
   const text = parts.join('\n\n');
 
@@ -729,6 +926,9 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
   return {
     text: parts.join('\n\n'),
     used,
+    chunksTotal: picked.total || 0,
+    chunksMatched: picked.matched || 0,
+    filesUsed: picked.filesUsed || 0,
     skipped,
     docCount: docs.length,
     imageCount: images.length,
@@ -786,16 +986,19 @@ ipcMain.handle('sessions:list', () => {
   return { sessions: idx.sessions, activeId: idx.activeId };
 });
 
-ipcMain.handle('sessions:create', (_e, title, members) => {
+ipcMain.handle('sessions:create', (_e, title, members, kb) => {
   const idx = loadSessionIndex();
   const id = newId();
   const t = (title || '').trim() || '新会话';
   const snapshot = Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : [];
-  writeJson(sessionPath(id), { id, title: t, messages: [], members: snapshot });
+  const kbSnapshot = kb && typeof kb === 'object'
+    ? JSON.parse(JSON.stringify(kb))
+    : { enabled: true, budget: 12000, files: [] };
+  writeJson(sessionPath(id), { id, title: t, messages: [], members: snapshot, kb: kbSnapshot });
   idx.sessions.unshift({ id, title: t, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 });
   idx.activeId = id;
   saveSessionIndex(idx);
-  return { id, title: t, messages: [], members: snapshot };
+  return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot };
 });
 
 ipcMain.handle('sessions:load', (_e, id) => {
@@ -807,7 +1010,7 @@ ipcMain.handle('sessions:load', (_e, id) => {
   return file;
 });
 
-ipcMain.handle('sessions:save', (_e, { id, messages, title, members }) => {
+ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb }) => {
   const idx = loadSessionIndex();
   const existing = readJson(sessionPath(id), { id, title: '新会话', messages: [] });
   const data = {
@@ -815,6 +1018,9 @@ ipcMain.handle('sessions:save', (_e, { id, messages, title, members }) => {
     title: title || existing.title || '新会话',
     messages: Array.isArray(messages) ? messages : existing.messages,
     members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (existing.members || []),
+    kb: (kb && typeof kb === 'object')
+      ? JSON.parse(JSON.stringify(kb))
+      : (existing.kb || { enabled: true, budget: 12000, files: [] }),
     savedAt: Date.now(),
   };
   writeJson(sessionPath(id), data);

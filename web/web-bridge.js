@@ -200,17 +200,20 @@
     return { sessions: idx.sessions, activeId: idx.activeId };
   }
 
-  async function createSession(title, members) {
+  async function createSession(title, members, kb) {
     const idx = await getIndex();
     const id = uid();
     const t = (title || '').trim() || '新会话';
     const snapshot = Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : [];
-    const data = { id, title: t, messages: [], members: snapshot, createdAt: Date.now(), updatedAt: Date.now() };
+    const kbSnapshot = (kb && typeof kb === 'object')
+      ? JSON.parse(JSON.stringify(kb))
+      : { enabled: true, budget: 12000, files: [] };
+    const data = { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, createdAt: Date.now(), updatedAt: Date.now() };
     await idbPut('sessions', data);
     idx.sessions.unshift({ id, title: t, messageCount: 0, createdAt: data.createdAt, updatedAt: data.updatedAt });
     idx.activeId = id;
     await putIndex(idx);
-    return { id, title: t, messages: [], members: snapshot };
+    return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot };
   }
 
   async function loadSession(id) {
@@ -222,13 +225,14 @@
     return s;
   }
 
-  async function saveSession({ id, messages, title, members }) {
+  async function saveSession({ id, messages, title, members, kb }) {
     const old = (await idbGet('sessions', id)) || { id, title: '新会话', messages: [] };
     const data = {
       id,
       title: title || old.title,
       messages: Array.isArray(messages) ? messages : old.messages,
       members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (old.members || []),
+      kb: (kb && typeof kb === 'object') ? JSON.parse(JSON.stringify(kb)) : (old.kb || { enabled: true, budget: 12000, files: [] }),
       createdAt: old.createdAt || Date.now(),
       updatedAt: Date.now(),
     };
@@ -633,22 +637,87 @@
     return (json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content) || '';
   }
 
-  async function kbContext({ files, budget = 12000, wantImages = false, ocr = null }) {
+  const CHUNK_SIZE = 800;
+  const CHUNK_OVERLAP = 120;
+
+  function splitChunks(text) {
+    const chunks = [];
+    let i = 0;
+    while (i < text.length) {
+      let end = Math.min(text.length, i + CHUNK_SIZE);
+      if (end < text.length) {
+        const nl = text.lastIndexOf('\n', end);
+        if (nl > i + CHUNK_SIZE * 0.5) end = nl;
+      }
+      chunks.push(text.slice(i, end));
+      if (end >= text.length) break;
+      i = Math.max(end - CHUNK_OVERLAP, i + 1);
+    }
+    return chunks;
+  }
+
+  function queryTerms(query) {
+    const q = String(query || '').toLowerCase();
+    const terms = new Set();
+    for (const m of q.matchAll(/[a-z0-9_]{2,}/g)) terms.add(m[0]);
+    for (const seg of q.replace(/[^\u4e00-\u9fa5]+/g, ' ').split(/\s+/)) {
+      if (seg.length === 1) terms.add(seg);
+      for (let i = 0; i + 1 < seg.length; i++) terms.add(seg.slice(i, i + 2));
+    }
+    return [...terms].filter(Boolean).slice(0, 60);
+  }
+
+  function scoreChunk(chunk, terms) {
+    if (!terms.length) return 0;
+    const low = chunk.toLowerCase();
+    let score = 0;
+    for (const t of terms) {
+      let idx = 0;
+      let hits = 0;
+      while ((idx = low.indexOf(t, idx)) >= 0 && hits < 12) { hits++; idx += t.length; }
+      if (hits) score += hits * (t.length >= 2 ? 1 : 0.4);
+    }
+    return score;
+  }
+
+  async function kbContext({ files, budget = 12000, wantImages = false, ocr = null, query = '' }) {
     const docs = (files || []).filter((f) => f.kind !== 'image');
     const images = (files || []).filter((f) => f.kind === 'image');
     const parts = [];
     let used = 0;
     let skipped = 0;
 
+    // 关键词检索：挑最相关的片段
+    const terms = queryTerms(query);
+    const scored = [];
     for (const f of docs) {
-      let text = (await idbGet('kbcache', f.path)) || '';
-      text = String(text).replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      const text = String((await idbGet('kbcache', f.path)) || '')
+        .replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
       if (!text) { skipped++; continue; }
-      const remain = budget - used;
-      if (remain <= 200) { skipped++; continue; }
-      const slice = text.slice(0, remain);
-      parts.push(`【资料：${f.name}】\n${slice}${slice.length < text.length ? '\n…（内容过长已截断）' : ''}`);
-      used += slice.length;
+      splitChunks(text).forEach((chunk, idx) => {
+        scored.push({ file: f.name, idx, chunk, score: scoreChunk(chunk, terms) });
+      });
+    }
+
+    const totalChunks = scored.length;
+    let picked = terms.length
+      ? scored.filter((x) => x.score > 0).sort((a, b) => b.score - a.score)
+      : scored.slice(0, 12);
+    if (terms.length && !picked.length) picked = scored.slice(0, 12);
+
+    let matched = 0;
+    for (const item of picked) {
+      const block = `【${item.file}】\n${item.chunk.trim()}`;
+      if (used + block.length > budget) {
+        const remain = budget - used;
+        if (remain < 200) break;
+        parts.push(block.slice(0, remain));
+        used += remain;
+        break;
+      }
+      parts.push(block);
+      used += block.length;
+      if (item.score > 0) matched++;
     }
 
     const imagePayload = [];

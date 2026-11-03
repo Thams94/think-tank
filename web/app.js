@@ -127,6 +127,12 @@ async function init() {
     if (Array.isArray(data.members)) {
       state.members = data.members;
     }
+    if (data.kb && typeof data.kb === 'object') {
+      state.kb = Object.assign({ enabled: true, budget: 12000, files: [] }, data.kb);
+    } else if (state.kb.files && state.kb.files.length) {
+      // 从旧版本升级：把全局知识库并入当前会话，避免资料丢失
+      saveKbToSession();
+    }
   }
 
   if (!state.members.length) seedMembers();
@@ -168,6 +174,7 @@ function persistChat() {
       id: state.activeSessionId,
       messages: state.messages,
       members: state.members,
+      kb: state.kb,
     });
     const s = state.sessions.find((x) => x.id === state.activeSessionId);
     if (s) {
@@ -305,6 +312,7 @@ async function switchSession(id) {
       id: state.activeSessionId,
       messages: state.messages,
       members: state.members,
+      kb: state.kb,
     });
   }
   const data = await bridge.loadSession(id);
@@ -314,6 +322,12 @@ async function switchSession(id) {
   if (Array.isArray(data.members)) {
     state.members = data.members;
   }
+  if (data.kb && typeof data.kb === 'object') {
+    state.kb = Object.assign({ enabled: true, budget: 12000, files: [] }, data.kb);
+  } else {
+    state.kb = { enabled: true, budget: 12000, files: [] };
+  }
+  state.kbCache.clear();
   renderAll();
 }
 
@@ -322,12 +336,15 @@ async function newSession() {
   if (state.activeSessionId) {
     await bridge.saveSession({ id: state.activeSessionId, messages: state.messages });
   }
-  // 新会话：成员留空，由用户自己添加
-  const s = await bridge.createSession('新会话', []);
+  // 新会话：成员和知识库都留空
+  const emptyKb = { enabled: true, budget: 12000, files: [] };
+  const s = await bridge.createSession('新会话', [], emptyKb);
   state.sessions.unshift({ id: s.id, title: s.title, messageCount: 0, updatedAt: Date.now() });
   state.activeSessionId = s.id;
   state.messages = [];
   state.members = [];
+  state.kb = emptyKb;
+  state.kbCache.clear();
   renderAll();          // 整页重绘：成员栏、@ 快捷、用量统计一起清空
   $('#input').focus();
 }
@@ -647,6 +664,8 @@ function kbKey(wantImages) {
 
 async function getKbContext(member) {
   if (!state.kb.enabled || !state.kb.files.length) return { text: '', images: [] };
+  const lastUser = [...state.messages].reverse().find((m) => m.role === 'user');
+  const query = lastUser ? lastUser.text : '';
   const wantImages = Boolean(member && member.supportsImages);
   const key = kbKey(wantImages);
   if (state.kbCache.has(key)) return state.kbCache.get(key);
@@ -660,6 +679,7 @@ async function getKbContext(member) {
       budget: Number(state.kb.budget) || 12000,
       wantImages,
       ocr,
+      query,
     });
     state.kbCache.set(key, ctx);
     return ctx;
@@ -1483,15 +1503,40 @@ function bindEvents() {
     }
     state.kbCache.clear();
     renderKbList();
-    persistConfig();
+    saveKbToSession();
   };
 
   $('#kbEnabled').onchange = () => {
     state.settings.safetyCap = Math.max(1, Number($('#safetyCap').value) || DEFAULT_SAFETY_CAP);
     state.kb.enabled = $('#kbEnabled').checked;
     state.kbCache.clear();
-    persistConfig();
+    saveKbToSession();
   };
+
+  // 文件夹导入（仅桌面版支持）
+  const folderBtn = $('#btnAddKbFolder');
+  if (folderBtn) {
+    folderBtn.hidden = typeof bridge.kbPickFolder !== 'function';
+    folderBtn.onclick = async () => {
+      try {
+        const r = await bridge.kbPickFolder();
+        await ensureWindowFocus();
+        if (!r || !r.paths || !r.paths.length) return;
+        pushSystem(`正在解析 ${r.paths.length} 个文件…`);
+        const entries = await bridge.kbIndex(r.paths);
+        const have = new Set(state.kb.files.map((f) => f.path));
+        for (const e of entries) if (!have.has(e.path)) state.kb.files.push(e);
+        state.kbCache.clear();
+        renderKbList();
+        saveKbToSession();
+        if (r.truncated) pushSystem('文件夹内文件过多，只导入了前 800 个。');
+        const okCount = entries.filter((e) => e.ok).length;
+        pushSystem(`已从文件夹导入 ${okCount}/${entries.length} 个文件。`);
+      } catch (e) {
+        pushSystem('导入文件夹失败：' + String(e.message || e));
+      }
+    };
+  }
 
   $('#btnSaveSettings').onclick = async () => {
     const providers = collectProvidersFromDom();
@@ -1569,6 +1614,18 @@ function bindEvents() {
   };
 }
 
+function saveKbToSession() {
+  if (state.activeSessionId) {
+    bridge.saveSession({
+      id: state.activeSessionId,
+      messages: state.messages,
+      members: state.members,
+      kb: state.kb,
+    });
+  }
+  persistConfig();
+}
+
 function renderKbList() {
   const box = $('#kbList');
   if (!box) return;
@@ -1589,7 +1646,7 @@ function renderKbList() {
       state.kb.files = state.kb.files.filter((x) => x.path !== f.path);
       state.kbCache.clear();
       renderKbList();
-      persistConfig();
+      saveKbToSession();
     };
     box.appendChild(row);
   }

@@ -15,12 +15,14 @@ contextBridge.exposeInMainWorld('api', {
 
   // 知识库
   kbPick: () => ipcRenderer.invoke('kb:pick'),
+  kbPickFolder: () => ipcRenderer.invoke('kb:pickFolder'),
+  kbScanFolder: (dir) => ipcRenderer.invoke('kb:scanFolder', dir),
   kbIndex: (paths) => ipcRenderer.invoke('kb:index', paths),
   kbContext: (payload) => ipcRenderer.invoke('kb:context', payload),
 
   // 会话
   listSessions: () => ipcRenderer.invoke('sessions:list'),
-  createSession: (title, members) => ipcRenderer.invoke('sessions:create', title, members),
+  createSession: (title, members, kb) => ipcRenderer.invoke('sessions:create', title, members, kb),
   loadSession: (id) => ipcRenderer.invoke('sessions:load', id),
   saveSession: (payload) => ipcRenderer.invoke('sessions:save', payload),
   renameSession: (payload) => ipcRenderer.invoke('sessions:rename', payload),
