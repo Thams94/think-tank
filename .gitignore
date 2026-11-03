@@ -31,3 +31,8 @@ Thumbs.db
 
 # 测试用浏览器配置
 .edge-profile/
+
+# 临时测试文件
+.testfiles/
+web/test-kb.txt
+kb-test-folder/
