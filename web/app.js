@@ -124,7 +124,7 @@ async function init() {
     const data = await bridge.loadSession(state.activeSessionId);
     state.activeSessionId = data.id;
     state.messages = data.messages || [];
-    if (Array.isArray(data.members) && data.members.length) {
+    if (Array.isArray(data.members)) {
       state.members = data.members;
     }
   }
@@ -310,12 +310,11 @@ async function switchSession(id) {
   const data = await bridge.loadSession(id);
   state.activeSessionId = data.id;
   state.messages = data.messages || [];
-  if (Array.isArray(data.members) && data.members.length) {
+  // 有 members 字段就用它（哪怕是空数组）；老会话没有该字段则沿用当前成员
+  if (Array.isArray(data.members)) {
     state.members = data.members;
   }
-  renderSessions();
-  renderMessages();
-  refreshUsageTotal();
+  renderAll();
 }
 
 async function newSession() {
@@ -323,14 +322,13 @@ async function newSession() {
   if (state.activeSessionId) {
     await bridge.saveSession({ id: state.activeSessionId, messages: state.messages });
   }
-  // 新会话继承当前成员快照
-  const s = await bridge.createSession('新会话', state.members);
+  // 新会话：成员留空，由用户自己添加
+  const s = await bridge.createSession('新会话', []);
   state.sessions.unshift({ id: s.id, title: s.title, messageCount: 0, updatedAt: Date.now() });
   state.activeSessionId = s.id;
   state.messages = [];
-  renderSessions();
-  renderMessages();
-  refreshUsageTotal();
+  state.members = [];
+  renderAll();          // 整页重绘：成员栏、@ 快捷、用量统计一起清空
   $('#input').focus();
 }
 
@@ -1315,8 +1313,11 @@ function renderModelOptions(providerId, currentModel) {
 }
 
 function openMemberModal(id) {
-  state.editingMemberId = id;
   const m = id ? state.members.find((x) => x.id === id) : null;
+  // 列表残留（成员已被切换/删除）时，刷新界面而不是当成"新增"
+  if (id && !m) { renderAll(); return; }
+
+  state.editingMemberId = id;
 
   $('#modalSettings').hidden = true;   // 避免被设置弹窗的遮罩挡住
 
