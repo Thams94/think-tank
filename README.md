@@ -68,7 +68,7 @@ npm install
 npm start
 ```
 
-或直接下载安装包：[AIGroupChat-Setup-0.3.7.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.3.7/AIGroupChat-Setup-0.3.7.exe)（102 MB，Windows）
+或直接下载安装包：[AIGroupChat-Setup-0.3.8.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.3.8/AIGroupChat-Setup-0.3.8.exe)（102 MB，Windows）
 
 ### 配置
 
