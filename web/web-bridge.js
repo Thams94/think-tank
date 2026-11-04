@@ -200,7 +200,7 @@
     return { sessions: idx.sessions, activeId: idx.activeId };
   }
 
-  async function createSession(title, members, kb, groupPrompt) {
+  async function createSession(title, members, kb, groupPrompt, issues) {
     const idx = await getIndex();
     const id = uid();
     const t = (title || '').trim() || '新会话';
@@ -209,12 +209,12 @@
       ? JSON.parse(JSON.stringify(kb))
       : { enabled: true, budget: 12000, files: [] };
     const gp = typeof groupPrompt === 'string' ? groupPrompt : '';
-    const data = { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: gp, createdAt: Date.now(), updatedAt: Date.now() };
+    const data = { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: gp, issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : [], createdAt: Date.now(), updatedAt: Date.now() };
     await idbPut('sessions', data);
     idx.sessions.unshift({ id, title: t, messageCount: 0, createdAt: data.createdAt, updatedAt: data.updatedAt });
     idx.activeId = id;
     await putIndex(idx);
-    return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: gp };
+    return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: gp, issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : [] };
   }
 
   async function loadSession(id) {
@@ -226,7 +226,7 @@
     return s;
   }
 
-  async function saveSession({ id, messages, title, members, kb, groupPrompt }) {
+  async function saveSession({ id, messages, title, members, kb, groupPrompt, issues }) {
     const old = (await idbGet('sessions', id)) || { id, title: '新会话', messages: [] };
     const data = {
       id,
@@ -235,6 +235,7 @@
       members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (old.members || []),
       kb: (kb && typeof kb === 'object') ? JSON.parse(JSON.stringify(kb)) : (old.kb || { enabled: true, budget: 12000, files: [] }),
       groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : (old.groupPrompt || ''),
+      issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : (old.issues || []),
       createdAt: old.createdAt || Date.now(),
       updatedAt: Date.now(),
     };
@@ -430,6 +431,46 @@
     return { ok: true };
   }
 
+  async function generatePlan(req) {
+    const cfg = await loadConfig();
+    const provider = cfg.providers.find((p) => p.id === req.providerId) || cfg.providers[0];
+    if (!provider) return { ok: false, error: '没有可用的供应商，请先在设置里添加' };
+    const apiKey = decodeKey(provider.apiKeyEnc);
+    const base = normalizeBase(provider.baseUrl);
+    const body = {
+      model: req.model,
+      messages: req.messages,
+      temperature: 0.3,
+    };
+    if (req.maxTokens > 0) body.max_tokens = req.maxTokens;
+    if (req.json !== false) body.response_format = { type: 'json_object' };
+
+    const headers = {
+      Authorization: 'Bearer ' + apiKey,
+      'Content-Type': 'application/json',
+    };
+    try {
+      let res = await fetch(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body) });
+      if (!res.ok) {
+        let text = await res.text();
+        if (body.response_format && /response_format|json_object|unsupported|invalid|unknown/i.test(text)) {
+          delete body.response_format;
+          res = await fetch(base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body) });
+          if (res.ok) {
+            const d2 = await res.json();
+            return { ok: true, text: d2.choices?.[0]?.message?.content || '', usage: d2.usage || null };
+          }
+          text = await res.text();
+        }
+        return { ok: false, error: 'HTTP ' + res.status + '：' + text.slice(0, 500) };
+      }
+      const data = await res.json();
+      return { ok: true, text: data.choices?.[0]?.message?.content || '', usage: data.usage || null };
+    } catch (e) {
+      return { ok: false, error: humanError(e) };
+    }
+  }
+
   async function listModels(providerId, apiKey) {
     const cfg = await loadConfig();
     const provider = cfg.providers.find((p) => p.id === providerId) || cfg.providers[0];
@@ -445,7 +486,14 @@
     if (!res.ok) throw new Error('HTTP ' + res.status + '：' + (await res.text()).slice(0, 300));
     const data = await res.json();
     const items = data.data || data.models || [];
-    return items.map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean).sort();
+    return items.map((m) => {
+      if (typeof m === 'string') return m.trim();
+      const id = m.id ? String(m.id).trim() : '';
+      const name = m.name ? String(m.name).trim() : '';
+      const display = m.display_name ? String(m.display_name).trim() : '';
+      if (id && /^[a-zA-Z][\w.\-+]*$/.test(id)) return id;
+      return name || display || id;
+    }).filter(Boolean).sort();
   }
 
   /* ================= 知识库 ================= */
@@ -689,6 +737,34 @@
       if (hits) score += hits * (t.length >= 2 ? 1 : 0.4);
     }
     return score;
+  }
+
+  async function kbDigest({ files, budget = 40000 }) {
+    const docs = (files || []).filter((f) => f.kind !== 'image');
+    const images = (files || []).filter((f) => f.kind === 'image');
+    const out = [];
+    let used = 0;
+    const perFile = Math.max(1000, Math.min(4000, Math.floor(budget / Math.max(docs.length, 1))));
+    for (const f of docs) {
+      if (used >= budget) break;
+      try {
+        const text = String((await idbGet('kbcache', f.path)) || '')
+          .replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+        if (!text) { out.push({ name: f.name, chars: 0, head: '', tail: '' }); continue; }
+        const remain = budget - used;
+        const head = text.slice(0, Math.min(perFile, remain));
+        let tail = '';
+        if (text.length > head.length + 400 && remain - head.length > 400) {
+          tail = text.slice(-Math.min(1200, remain - head.length));
+          if (tail.length < 100) tail = '';
+        }
+        used += head.length + tail.length;
+        out.push({ name: f.name, chars: text.length, head, tail });
+      } catch (e) {
+        out.push({ name: f.name, chars: 0, head: '', tail: '', error: String(e.message || e) });
+      }
+    }
+    return { files: out, images: images.map((f) => ({ name: f.name })), used, docCount: docs.length };
   }
 
   async function kbContext({ files, budget = 12000, wantImages = false, ocr = null, query = '' }) {
@@ -965,8 +1041,9 @@
     },
     getConfig, saveConfig,
     listModels,
+    generatePlan,
     run, abort, onDelta,
-    kbPick, kbIndex, kbContext,
+    kbPick, kbIndex, kbContext, kbDigest,
     kbAddFiles: async (files) => registerFiles(files),
     webSearch,
     exportMarkdown,

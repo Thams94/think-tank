@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('api', {
   kbClearCache: () => ipcRenderer.invoke('kb:clearCache'),
   kbIndex: (paths) => ipcRenderer.invoke('kb:index', paths),
   kbContext: (payload) => ipcRenderer.invoke('kb:context', payload),
+  kbDigest: (payload) => ipcRenderer.invoke('kb:digest', payload),
 
   // 会话
   listSessions: () => ipcRenderer.invoke('sessions:list'),
@@ -52,6 +53,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // 单次生成
   run: (req) => ipcRenderer.invoke('chat:run', req),
+  generatePlan: (req) => ipcRenderer.invoke('plan:generate', req),
   abort: (runId) => ipcRenderer.invoke('chat:abort', runId),
 
   onDelta: (cb) => {

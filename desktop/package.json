@@ -1,7 +1,7 @@
 {
   "name": "ai-group-chat",
-  "version": "0.4.7",
-  "description": "多模型群聊：把不同 AI 拉进同一个对话，支持私密@与多种调度",
+  "version": "0.5.0",
+  "description": "智库：多模型审核工作台，自动组建审核团队并按议题逐项推进",
   "main": "main.js",
   "author": "local",
   "license": "MIT",
@@ -18,7 +18,7 @@
   },
   "build": {
     "appId": "com.harness.aigroupchat",
-    "productName": "AI群聊",
+    "productName": "智库",
     "copyright": "© 2026",
     "directories": {
       "output": "release",
@@ -42,7 +42,7 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "artifactName": "AI群聊-安装程序-${version}.${ext}"
+      "artifactName": "智库-安装程序-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -51,7 +51,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "AI群聊",
+      "shortcutName": "智库",
       "installerLanguages": [
         "zh_CN"
       ],

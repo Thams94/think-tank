@@ -8,16 +8,20 @@ const state = {
   groupPrompt: '',
   members: [],
   messages: [],
-  settings: { mode: 'manual', rounds: 1, moderatorId: null, searchEnabled: false },
+  settings: { mode: 'manual', rounds: 1, moderatorId: null, searchEnabled: false, plannerProviderId: null, plannerModel: null },
   editingMemberId: null,
   running: false,
   stopRequested: false,
+  paused: false,
   activeRuns: new Set(),
   sessions: [],
   activeSessionId: null,
-  collapsed: { sessions: false, members: false },
+  collapsed: { sessions: false, members: false, issues: false },
   kb: { enabled: true, budget: 12000, files: [] },
   kbCache: new Map(),
+  issues: [],
+  currentIssueId: null,
+  draftPlan: { requirement: '', feedback: [], team: [], issues: [], raw: '' },
 };
 
 const DEFAULT_SAFETY_CAP = 200;   // 不限轮数时的默认上限，可在设置里改
@@ -102,11 +106,11 @@ async function init() {
   state.proxy = cfg.proxy || '';
   state.groupPrompt = cfg.groupPrompt || '';
   state.kb = cfg.kb || { enabled: true, budget: 12000, files: [] };
-  state.collapsed = (cfg.settings && cfg.settings.collapsed) || { sessions: false, members: false };
+  state.collapsed = Object.assign({ sessions: false, members: false, issues: false }, (cfg.settings && cfg.settings.collapsed) || {});
   if (!Array.isArray(state.kb.files)) state.kb.files = [];
   state.members = cfg.members || [];
   state.settings = Object.assign(
-    { mode: 'manual', rounds: 1, moderatorId: null, searchEnabled: false },
+    { mode: 'manual', rounds: 1, moderatorId: null, searchEnabled: false, plannerProviderId: null, plannerModel: null },
     cfg.settings || {}
   );
 
@@ -138,6 +142,7 @@ async function init() {
       // 从旧版本升级：把全局知识库并入当前会话，避免资料丢失
       saveKbToSession();
     }
+    state.issues = Array.isArray(data.issues) ? data.issues : [];
   }
 
   if (!state.members.length) seedMembers();
@@ -181,6 +186,7 @@ function persistChat() {
     members: state.members,
     kb: state.kb,
     groupPrompt: state.groupPrompt,
+    issues: state.issues,
   };
   saveTimer = setTimeout(async () => {
     if (!sessionId) return;
@@ -190,6 +196,7 @@ function persistChat() {
       members: snapshot.members,
       kb: snapshot.kb,
       groupPrompt: snapshot.groupPrompt,
+      issues: snapshot.issues,
     });
     const s = state.sessions.find((x) => x.id === sessionId);
     if (s) {
@@ -329,6 +336,7 @@ async function switchSession(id) {
       members: state.members,
       kb: state.kb,
       groupPrompt: state.groupPrompt,
+      issues: state.issues,
     });
   }
   const data = await bridge.loadSession(id);
@@ -344,6 +352,8 @@ async function switchSession(id) {
   } else {
     state.kb = { enabled: true, budget: 12000, files: [] };
   }
+  state.issues = Array.isArray(data.issues) ? data.issues : [];
+  state.currentIssueId = null;
   state.kbCache.clear();
   renderAll();
 }
@@ -360,6 +370,8 @@ async function newSession() {
   state.activeSessionId = s.id;
   state.messages = [];
   state.members = [];
+  state.issues = [];
+  state.currentIssueId = null;
   state.groupPrompt = '';
   state.kb = emptyKb;
   state.kbCache.clear();
@@ -395,10 +407,13 @@ function applyLayout() {
   const app = document.querySelector('.app');
   app.classList.toggle('sessions-collapsed', Boolean(state.collapsed.sessions));
   app.classList.toggle('members-collapsed', Boolean(state.collapsed.members));
+  app.classList.toggle('issues-collapsed', Boolean(state.collapsed.issues));
   const bs = $('#btnCollapseSessions');
   const bm = $('#btnCollapseMembers');
+  const bi = $('#btnCollapseIssues');
   if (bs) bs.textContent = state.collapsed.sessions ? '⟩' : '⟨';
   if (bm) bm.textContent = state.collapsed.members ? '⟩' : '⟨';
+  if (bi) bi.textContent = state.collapsed.issues ? '⟨' : '⟩';
 }
 
 function toggleCollapse(which) {
@@ -412,6 +427,7 @@ function renderAll() {
   applyLayout();
   renderSessions();
   renderMembers();
+  renderIssues();
   renderQuickAt();
   renderMode();
   renderMessages();
@@ -580,6 +596,7 @@ function messageNode(m) {
       <div class="bubble md">${mdRender(m.text || '')}</div>
       ${m.reasoning ? `<div class="reasoning">${escapeHtml(m.reasoning)}</div>` : ''}
       ${m.error ? `<div class="err">${escapeHtml(m.error)}</div>` : ''}
+      ${m.note ? `<div class="err">${escapeHtml(m.note)}</div>` : ''}
       ${usageHtml(m)}
     </div>`;
 
@@ -659,6 +676,10 @@ function buildMessages(member, extra, kbText, searchText) {
   const sysParts = [];
   if (state.groupPrompt) sysParts.push(state.groupPrompt);
   if (member.persona) sysParts.push(`【你的角色】${member.persona}`);
+  if (state.currentIssueId) {
+    const isu = state.issues.find((x) => x.id === state.currentIssueId);
+    if (isu) sysParts.push(`【当前议题】${isu.title}\n要求：${isu.brief || '无'}\n验收标准：${isu.acceptance || '无'}\n围绕这个议题发言，不要扯到别的议题。`);
+  }
   sysParts.push('你正在一个多模型群聊里。你能看到其他成员的公开发言；发言时直接给内容，不要复述别人，也不要假装自己是别人。');
   sysParts.push(`群成员：${state.members.map((m) => m.name).join('、')}。你的名字是「${member.name}」。`);
   if (kbText) {
@@ -759,6 +780,7 @@ async function runMember(member, opts = {}) {
     pushSystem(`成员「${member.name}」还没有选供应商`);
     return null;
   }
+  await pauseGate();
 
   const msg = {
     id: uid(), role: 'assistant', memberId: member.id, name: member.name,
@@ -776,8 +798,20 @@ async function runMember(member, opts = {}) {
   const runId = uid();
   state.activeRuns.add(runId);
 
+  let watchdog = null;
+  let stuck = false;
+  const bumpWatchdog = () => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      stuck = true;
+      try { bridge.abort(runId); } catch { /* 忽略 */ }
+    }, watchdogMs());
+  };
+  bumpWatchdog();
+
   const offDelta = bridge.onDelta((d) => {
     if (d.runId !== runId) return;
+    bumpWatchdog();
     if (d.type === 'usage') {
       msg.usage = d.usage;
       renderUsageInto(node, msg);
@@ -835,10 +869,16 @@ async function runMember(member, opts = {}) {
     if (/abort|cancel/i.test(String(e.message || e))) msg.stopped = true;
     else msg.error = String(e.message || e);
   } finally {
+    clearTimeout(watchdog);
     offDelta();
     // rAF 节流可能还没落地最后一帧，结束后强制渲染一次
     if (msg.text) bubble.innerHTML = mdRender(msg.text);
     state.activeRuns.delete(runId);
+
+    if (stuck) {
+      msg.interrupted = true;
+      msg.note = `超过 ${Math.round(watchdogMs() / 1000)} 秒没有收到任何数据，已自动中止。可以点「继续生成」重试。`;
+    }
     refreshUsageTotal();
     if (msg.truncated || msg.interrupted) {
       const fresh = messageNode(msg);
@@ -864,10 +904,18 @@ async function continueMessage(m) {
   m.truncated = false;
   m.interrupted = false;
 
+  // 防御：如果状态残留（例如上一次请求异常结束），先复位再继续
+  if (state.running && (!state.activeRuns || state.activeRuns.size === 0)) {
+    resetRunState();
+  }
+
   state.running = true;
   state.stopRequested = false;
+  state.paused = false;
   $('#btnSend').disabled = true;
   $('#btnStop').hidden = false;
+  const bp = $('#btnPause');
+  if (bp) { bp.hidden = false; bp.textContent = '暂停'; bp.classList.remove('paused'); }
 
   const runId = uid();
   state.activeRuns.add(runId);
@@ -924,7 +972,10 @@ function mergeUsage(a, b) {
 function stopAll() {
   if (!state.running) return;
   state.stopRequested = true;
+  state.paused = false;
   state.activeRuns.forEach((id) => bridge.abort(id));
+  const pause = $('#btnPause');
+  if (pause) { pause.hidden = true; pause.textContent = '暂停'; pause.classList.remove('paused'); }
   pushSystem('已请求停止');
 }
 
@@ -1020,8 +1071,11 @@ async function send() {
 
   state.running = true;
   state.stopRequested = false;
+  state.paused = false;
   $('#btnSend').disabled = true;
   $('#btnStop').hidden = false;
+  const bp = $('#btnPause');
+  if (bp) { bp.hidden = false; bp.textContent = '暂停'; bp.classList.remove('paused'); }
   try {
     state.currentSearchText = await prepareSearch(userMsg.text);
     const enabled = state.members.filter((m) => m.enabled !== false && m.model && providerOf(m));
@@ -1038,15 +1092,22 @@ async function send() {
       return;
     }
 
-    await runDiscussion(state.settings.mode, rounds, enabled);
+    if (state.settings.mode === 'moderator' && state.issues.length) {
+      await runIssueQueue(enabled, rounds);
+    } else {
+      await runDiscussion(state.settings.mode, rounds, enabled);
+    }
   } catch (e) {
     pushSystem('出错：' + String(e.message || e));
   } finally {
     state.running = false;
     state.stopRequested = false;
+    state.paused = false;
     state.currentSearchText = '';
     $('#btnSend').disabled = false;
     $('#btnStop').hidden = true;
+    const bp = $('#btnPause');
+    if (bp) { bp.hidden = true; bp.textContent = '暂停'; bp.classList.remove('paused'); }
     persistChat();
   }
 }
@@ -1119,17 +1180,27 @@ async function onResumeAction(m) {
 
   state.running = true;
   state.stopRequested = false;
+  state.paused = false;
   $('#btnSend').disabled = true;
   $('#btnStop').hidden = false;
+  const bp = $('#btnPause');
+  if (bp) { bp.hidden = false; bp.textContent = '暂停'; bp.classList.remove('paused'); }
   try {
-    await runDiscussion(state.settings.mode, 0, enabled);
+    if (state.settings.mode === 'moderator' && state.issues.length) {
+      await runIssueQueue(enabled, 0);
+    } else {
+      await runDiscussion(state.settings.mode, 0, enabled);
+    }
   } catch (e) {
     pushSystem('继续讨论出错：' + String(e.message || e));
   } finally {
     state.running = false;
     state.stopRequested = false;
+    state.paused = false;
     $('#btnSend').disabled = false;
     $('#btnStop').hidden = true;
+    const bp = $('#btnPause');
+    if (bp) { bp.hidden = true; bp.textContent = '暂停'; bp.classList.remove('paused'); }
     persistChat();
   }
 }
@@ -1157,9 +1228,15 @@ function pickModerator(enabled) {
 
 async function runModerated(rounds, enabled) {
   const moderator = pickModerator(enabled);
-  if (!moderator || !moderator.model) { pushSystem('主持人没有配置模型'); return; }
+  if (!moderator || !moderator.model) { pushSystem('主持人没有配置模型'); return ''; }
   const names = enabled.map((m) => m.name);
   const unlimited = rounds === 0;
+  let conclusion = '';
+
+  const curIssue = state.currentIssueId ? state.issues.find((x) => x.id === state.currentIssueId) : null;
+  const issueLine = curIssue
+    ? `当前议题：「${curIssue.title}」\n要求：${curIssue.brief || '无'}\n验收标准：${curIssue.acceptance || '无'}`
+    : '';
 
   pushSystem(
     `主持人：${moderator.name}${unlimited ? '（不限轮数，随时可点「停止」）' : `（最多 ${rounds} 次发言）`}`
@@ -1171,15 +1248,17 @@ async function runModerated(rounds, enabled) {
     const instruction = [
       '现在轮到你当主持人。',
       `可选成员：${names.join('、')}。`,
+      issueLine,
       '请阅读群聊记录，决定下一个发言者，并给 TA 一句提示。',
-      '如果你认为讨论已经充分、可以收尾了，就输出 {"done":true} 来结束讨论。',
-      '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true}',
-    ].join('\n');
+      '如果你认为讨论已经充分、可以收尾了，就输出 {"done":true,"conclusion":"本议题的最终结论"} 来结束讨论；结论要具体、可执行。',
+      '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true,"conclusion":"结论"}',
+    ].filter(Boolean).join('\n');
 
     const plan = parsePlan(await runSilent(moderator, instruction), names);
 
     if (plan.done) {
-      pushSystem(`主持人 ${moderator.name} 宣布讨论结束。`);
+      conclusion = plan.conclusion || '';
+      pushSystem(`主持人 ${moderator.name} 宣布讨论结束。${conclusion ? '\n\n结论：' + conclusion : ''}`);
       break;
     }
 
@@ -1192,6 +1271,7 @@ async function runModerated(rounds, enabled) {
   if (i >= cap && !state.stopRequested) {
     pushContinuePrompt(cap);
   }
+  return conclusion;
 }
 
 function parsePlan(text, names) {
@@ -1202,7 +1282,7 @@ function parsePlan(text, names) {
     const next = String(obj.next || obj.name || '');
     // 主持人可以用 done:true 或 next:"结束" 来收尾
     const done = obj.done === true || /^(结束|停止|收尾|end|stop|finish)$/i.test(next);
-    return { done, next, prompt: obj.prompt || obj.question || '' };
+    return { done, next, prompt: obj.prompt || obj.question || '', conclusion: obj.conclusion || obj.summary || '' };
   } catch {
     return { done: false, next: names[0] || '', prompt: '' };
   }
@@ -1211,6 +1291,7 @@ function parsePlan(text, names) {
 async function runSilent(member, extra) {
   const provider = providerOf(member);
   if (!provider) return '';
+  await pauseGate();
   const runId = uid();
   let text = '';
   const off = bridge.onDelta((d) => {
@@ -1228,6 +1309,393 @@ async function runSilent(member, extra) {
     return res.ok ? (res.text || text) : text;
   } finally {
     off();
+  }
+}
+
+/* ---------------- 策划组队 + 议题卡 ---------------- */
+
+const PLANNER_SYSTEM = [
+  '你是「智库」的审核方案策划者。用户会给你一段审核需求和资料，你要据此规划一个多成员审核团队，并拆解出待审核的议题卡。',
+  '',
+  '只输出一个 JSON 对象，不要输出任何解释、markdown 代码块或其它文字。JSON 结构必须严格如下：',
+  '{',
+  '  "team": [',
+  '    {"name":"成员名","role":"分工一句话","persona":"完整的系统提示词","suggestedModel":"从可用模型列表里选一个","isModerator":false,"color":"#RRGGBB"}',
+  '  ],',
+  '  "issues": [',
+  '    {"title":"议题标题","brief":"审核要求","acceptance":"验收标准"}',
+  '  ]',
+  '}',
+  '',
+  '规则：',
+  '1. team 至少 2 人，最多 6 人；必须且只能有 1 个 isModerator 为 true 的成员（主持人），负责组织讨论、判断议题是否完成并给出结论。',
+  '2. persona 要写清楚：审核范围、重点检查项、要给出什么证据、输出格式、如何与其他成员配合。',
+  '3. suggestedModel 必须从「可用模型」列表里原样选取，不能编造；根据分工选择最合适的。',
+  '4. issues 是把需求拆成的、可逐项审核的议题卡，每张卡的 brief 写清审什么，acceptance 写清怎样算通过。',
+  '5. 所有文字用中文。',
+].join('\n');
+
+function plannerRef() {
+  const pid = state.settings.plannerProviderId;
+  const model = state.settings.plannerModel;
+  const provider = state.providers.find((p) => p.id === pid) || state.providers[0];
+  return { provider: provider || null, model: model || '' };
+}
+
+function availableModelList() {
+  const out = [];
+  for (const p of state.providers) {
+    for (const m of (p.models || [])) out.push(`${p.name}：${m}`);
+  }
+  return out;
+}
+
+function parsePlanJson(text) {
+  if (!text) return null;
+  let obj = null;
+  try { obj = JSON.parse(text); } catch {
+    const m = String(text).match(/\{[\s\S]*\}/);
+    if (m) { try { obj = JSON.parse(m[0]); } catch { obj = null; } }
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const team = Array.isArray(obj.team) ? obj.team : (Array.isArray(obj.agents) ? obj.agents : []);
+  const issues = Array.isArray(obj.issues) ? obj.issues : (Array.isArray(obj.topics) ? obj.topics : []);
+  const normTeam = team.map((t) => ({
+    name: String(t.name || '成员').slice(0, 30),
+    role: String(t.role || t.responsibility || '').slice(0, 200),
+    persona: String(t.persona || t.prompt || '').slice(0, 4000),
+    suggestedModel: String(t.suggestedModel || t.model || '').split(/[：:]/).pop().trim(),
+    isModerator: t.isModerator === true || /主持/.test(String(t.role || '')),
+    color: /^#[0-9a-fA-F]{6}$/.test(t.color || '') ? t.color : null,
+  }));
+  const normIssues = issues.map((it) => ({
+    title: String(it.title || it.name || '议题').slice(0, 120),
+    brief: String(it.brief || it.requirement || it.desc || '').slice(0, 1000),
+    acceptance: String(it.acceptance || it.criteria || '').slice(0, 1000),
+  }));
+  if (!normTeam.length && !normIssues.length) return null;
+  return { team: normTeam, issues: normIssues };
+}
+
+const PALETTE = ['#5b8def', '#e06c5b', '#f5a623', '#46c2a3', '#9a6bd4', '#e08bc0'];
+
+async function runPlanner(feedback) {
+  const { provider, model } = plannerRef();
+  if (!provider) { pushSystem('请先在设置里添加供应商并选择策划模型'); return false; }
+  if (!model) { pushSystem('请先在设置里选择策划模型'); return false; }
+
+  const requirement = ($('#planRequirement') ? $('#planRequirement').value : state.draftPlan.requirement).trim();
+  if (!requirement && !state.draftPlan.team.length) { pushSystem('请先填写审核需求'); return false; }
+  state.draftPlan.requirement = requirement;
+
+  const models = availableModelList();
+  const userParts = [requirement];
+
+  // 读取知识库资料摘要，让策划模型了解待审核内容后再组队、拆议题
+  if (typeof bridge.kbDigest === 'function' && state.kb.files && state.kb.files.length) {
+    try {
+      const d = await bridge.kbDigest({ files: state.kb.files });
+      if (d && Array.isArray(d.files) && d.files.length) {
+        const blocks = d.files.map((f) => {
+          if (f.error) return `【文件：${f.name}】读取失败：${f.error}`;
+          const mid = f.tail ? '\n……（中间略）……\n' + f.tail : '';
+          return `【文件：${f.name}】（共 ${f.chars} 字）\n${f.head}${mid}`;
+        });
+        if (d.images && d.images.length) {
+          blocks.push('【图片资料】' + d.images.map((i) => i.name).join('、'));
+        }
+        userParts.unshift('以下是待审核的资料内容摘要（据它规划审核团队和议题卡，不要假设资料里没有的内容）：\n\n' + blocks.join('\n\n'));
+      }
+    } catch (e) {
+      pushSystem('读取知识库摘要失败：' + String(e.message || e));
+    }
+  }
+
+  for (const fb of state.draftPlan.feedback) userParts.push('【上一版方案的修改意见】' + fb);
+  if (feedback) userParts.push('【新的修改意见】' + feedback);
+  const user = userParts.join('\n\n');
+
+  const sys = models.length
+    ? PLANNER_SYSTEM + '\n\n可用模型（只能从这里选 suggestedModel）：\n' + models.join('\n')
+    : PLANNER_SYSTEM;
+
+  $('#planStatus').textContent = '策划模型正在生成方案…';
+  const res = await bridge.generatePlan({
+    providerId: provider.id,
+    model,
+    messages: [
+      { role: 'system', content: sys },
+      { role: 'user', content: user },
+    ],
+    json: true,
+    maxTokens: 0,
+  });
+
+  if (!res.ok) {
+    $('#planStatus').textContent = '策划失败：' + String(res.error || '未知错误');
+    return false;
+  }
+  const plan = parsePlanJson(res.text);
+  if (!plan) {
+    state.draftPlan.raw = res.text;
+    $('#planStatus').textContent = '返回内容不是合法 JSON，无法解析。';
+    renderPlanDraft();
+    return false;
+  }
+  state.draftPlan.team = plan.team;
+  state.draftPlan.issues = plan.issues;
+  state.draftPlan.raw = '';
+  if (feedback) state.draftPlan.feedback.push(feedback);
+  $('#planStatus').textContent = `已生成：${plan.team.length} 名成员、${plan.issues.length} 张议题卡。可在下面继续提意见。`;
+  renderPlanDraft();
+  return true;
+}
+
+function resolveProviderForModel(rawModelName) {
+  const modelName = String(rawModelName || '').split(/[：:]/).pop().trim();
+  if (!modelName) return { providerId: null, model: '' };
+  // 精确匹配
+  for (const p of state.providers) {
+    if ((p.models || []).includes(modelName)) return { providerId: p.id, model: modelName };
+  }
+  // 模糊匹配：模型名前缀相同（如 gemini-3.8-flash → gemini）
+  const prefix = String(modelName).split('-')[0].toLowerCase();
+  for (const p of state.providers) {
+    const hit = (p.models || []).find((m) => String(m).toLowerCase().startsWith(prefix + '-'));
+    if (hit) return { providerId: p.id, model: hit };
+  }
+  // 找不到：返回 null，让用户在成员编辑器里手动选，不乱配
+  return { providerId: null, model: modelName };
+}
+
+/** 检查模型是否属于该供应商 */
+function modelBelongsToProvider(providerId, rawModelName) {
+  const modelName = String(rawModelName || '').split(/[：:]/).pop().trim();
+  const p = state.providers.find((x) => x.id === providerId);
+  return !!(p && (p.models || []).includes(modelName));
+}
+
+function renderPlanDraft() {
+  const box = $('#planDraft');
+  if (!box) return;
+  const team = state.draftPlan.team || [];
+  const issues = state.draftPlan.issues || [];
+  if (!team.length && !issues.length) {
+    box.innerHTML = state.draftPlan.raw
+      ? `<div class="muted">模型返回了无法解析的内容：</div><pre class="raw">${escapeHtml(state.draftPlan.raw)}</pre>`
+      : '<div class="muted">填写需求后点「生成方案」。</div>';
+    return;
+  }
+  const teamHtml = team.map((t, i) => `
+    <div class="plan-row">
+      <span class="dot" style="background:${escapeHtml(t.color || PALETTE[i % PALETTE.length])}">${escapeHtml(initials(t.name))}</span>
+      <div class="plan-meta">
+        <div class="name">${escapeHtml(t.name)}${t.isModerator ? ' <span class="pill">主持人</span>' : ''} <span class="muted">· ${escapeHtml(t.suggestedModel || '未指定模型')}</span></div>
+        <div class="muted">${escapeHtml(t.role || '')}</div>
+      </div>
+    </div>`).join('');
+  const issueHtml = issues.map((it, i) => `
+    <div class="plan-issue">
+      <div class="name">${i + 1}. ${escapeHtml(it.title)}</div>
+      <div class="muted">${escapeHtml(it.brief || '')}</div>
+    </div>`).join('');
+  box.innerHTML = `
+    <div class="plan-sec"><div class="plan-sec-h">团队（${team.length} 人）</div>${teamHtml}</div>
+    <div class="plan-sec"><div class="plan-sec-h">议题卡（${issues.length} 张）</div>${issueHtml}</div>`;
+}
+
+async function applyPlan() {
+  const team = state.draftPlan.team || [];
+  const issues = state.draftPlan.issues || [];
+  if (!team.length) { pushSystem('方案里没有成员，无法应用'); return; }
+
+  const members = team.map((t, i) => {
+    const r = resolveProviderForModel(t.suggestedModel);
+    return {
+      id: uid(),
+      name: t.name || ('成员' + (i + 1)),
+      providerId: r.providerId,
+      model: r.model,
+      persona: t.persona || t.role || '',
+      temp: 0.7,
+      maxTokens: 0,
+      reasoning: 'off',
+      supportsImages: false,
+      color: t.color || PALETTE[i % PALETTE.length],
+      enabled: true,
+      isModerator: t.isModerator === true,
+    };
+  });
+
+  state.members = members;
+  state.issues = issues.map((it) => ({
+    id: uid(), title: it.title || '议题', brief: it.brief || '', acceptance: it.acceptance || '',
+    status: 'todo', conclusion: '',
+  }));
+  state.currentIssueId = null;
+
+  const mod = members.find((m) => m.isModerator) || members[members.length - 1];
+  state.settings.mode = 'moderator';
+  state.settings.moderatorId = mod.id;
+
+  $('#modalPlan').hidden = true;
+  persistConfig();
+  saveKbToSession();
+  renderAll();
+  pushSystem(`已创建审核团队（${members.length} 人）和 ${state.issues.length} 张议题卡。主持人：${mod.name}。发送消息后开始逐卡审核。`);
+}
+
+function openPlanModal() {
+  if (!state.providers.length) { openSettings(); return; }
+  if (!$('#planRequirement').value.trim()) {
+    $('#planRequirement').value = state.draftPlan.requirement || '';
+  }
+  $('#planStatus').textContent = state.draftPlan.team.length ? '已有方案草稿，可继续提意见或重新生成。' : '';
+  updatePlanKbHint();
+  renderPlanDraft();
+  $('#modalPlan').hidden = false;
+}
+
+function updatePlanKbHint() {
+  const el = $('#planKbHint');
+  if (!el) return;
+  const files = state.kb.files || [];
+  if (!files.length) {
+    el.textContent = '知识库为空：可以先添加文件，策划会读取文件内容来组队、拆议题。';
+    return;
+  }
+  const docs = files.filter((f) => f.kind !== 'image');
+  const imgs = files.filter((f) => f.kind === 'image');
+  const chars = docs.reduce((a, f) => a + (Number(f.chars) || 0), 0);
+  let s = `知识库：${docs.length} 份文档（约 ${fmtNum(chars)} 字）`;
+  if (imgs.length) s += `、${imgs.length} 张图片`;
+  s += '。策划组队时会读取这些内容。';
+  el.textContent = s;
+}
+
+function renderPlannerSelect() {
+  const pp = $('#plannerProvider');
+  const pm = $('#plannerModel');
+  if (!pp || !pm) return;
+
+  pp.innerHTML = state.providers
+    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`)
+    .join('');
+  const curPid = state.settings.plannerProviderId || (state.providers[0] ? state.providers[0].id : '');
+  pp.value = curPid;
+
+  const fillModels = () => {
+    const p = state.providers.find((x) => x.id === pp.value);
+    const models = (p && Array.isArray(p.models)) ? p.models.slice() : [];
+    const cur = state.settings.plannerModel;
+    if (cur && !models.includes(cur)) models.unshift(cur);
+    pm.innerHTML = models.length
+      ? models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')
+      : '<option value="">（先拉取模型）</option>';
+    pm.value = cur && models.includes(cur) ? cur : (models[0] || '');
+  };
+  pp.onchange = () => { fillModels(); };
+  fillModels();
+}
+
+/* ---------------- 议题卡 ---------------- */
+
+function renderIssues() {
+  const box = $('#issueList');
+  const count = $('#issueCount');
+  if (!box) return;
+  if (count) count.textContent = state.issues.length;
+  box.innerHTML = '';
+  if (!state.issues.length) {
+    box.innerHTML = '<div class="muted" style="padding:8px">还没有议题卡。点「策划组队」自动生成，或「+ 添加」手动创建。</div>';
+    return;
+  }
+  for (const it of state.issues) {
+    const statusCls = it.status === 'done' ? 'done' : (it.status === 'active' ? 'active' : (it.status === 'skipped' ? 'skipped' : 'todo'));
+    const statusTxt = { todo: '未审核', active: '审核中', done: '已审核', skipped: '已跳过' }[statusCls] || statusCls;
+    const row = document.createElement('div');
+    row.className = 'issue status-' + statusCls + (it.collapsed ? ' collapsed' : '');
+
+    const head = document.createElement('div');
+    head.className = 'issue-head';
+    head.innerHTML = `
+      <span class="pill status-${statusCls}">${statusTxt}</span>
+      <span class="name" title="${escapeHtml(it.title)}">${escapeHtml(it.title)}</span>
+      <button class="issue-edit" title="编辑议题">✎</button>`;
+    row.appendChild(head);
+
+    if (!it.collapsed) {
+      if (it.brief) {
+        const b = document.createElement('div');
+        b.className = 'muted';
+        b.textContent = it.brief;
+        row.appendChild(b);
+      }
+      if (it.conclusion) {
+        const c = document.createElement('div');
+        c.className = 'conclusion';
+        c.textContent = '结论：' + it.conclusion;
+        row.appendChild(c);
+      }
+    }
+
+    row.onclick = (e) => {
+      if (e.target.closest('.issue-edit')) return;
+      it.collapsed = !it.collapsed;
+      renderIssues();
+      saveKbToSession();
+    };
+    head.querySelector('.issue-edit').onclick = (e) => {
+      e.stopPropagation();
+      openIssueEditor(it.id);
+    };
+    box.appendChild(row);
+  }
+}
+
+function openIssueEditor(id) {
+  const it = state.issues.find((x) => x.id === id);
+  if (!it) { renderIssues(); return; }
+  $('#issueEditId').value = it.id;
+  $('#issueTitle').value = it.title;
+  $('#issueBrief').value = it.brief || '';
+  $('#issueAcceptance').value = it.acceptance || '';
+  $('#modalIssue').hidden = false;
+}
+
+function saveIssueEditor() {
+  const id = $('#issueEditId').value;
+  const title = $('#issueTitle').value.trim() || '议题';
+  const brief = $('#issueBrief').value.trim();
+  const acceptance = $('#issueAcceptance').value.trim();
+  if (id) {
+    const it = state.issues.find((x) => x.id === id);
+    if (it) { it.title = title; it.brief = brief; it.acceptance = acceptance; }
+  } else {
+    state.issues.push({ id: uid(), title, brief, acceptance, status: 'todo', conclusion: '' });
+  }
+  $('#modalIssue').hidden = true;
+  renderIssues();
+  saveKbToSession();
+}
+
+async function runIssueQueue(enabled, rounds) {
+  const todo = state.issues.filter((i) => i.status === 'todo' || i.status === 'active');
+  if (!todo.length) { pushSystem('没有待审核的议题。'); return; }
+  for (const issue of todo) {
+    if (state.stopRequested) break;
+    issue.status = 'active';
+    state.currentIssueId = issue.id;
+    renderIssues();
+    pushSystem(`━━ 开始审核议题：${issue.title} ━━`);
+    const conclusion = await runModerated(rounds, enabled);
+    issue.conclusion = conclusion || '';
+    issue.status = 'done';
+    state.currentIssueId = null;
+    renderIssues();
+    persistChat();
+    if (issue.conclusion) pushSystem(`✅ 议题完成：${issue.title}\n\n结论：${issue.conclusion}`);
+    else pushSystem(`✅ 议题完成：${issue.title}（无结论）`);
   }
 }
 
@@ -1341,6 +1809,58 @@ async function onProviderAction(card, act) {
   }
 }
 
+async function fetchAllModels() {
+  const btn = $('#btnFetchAllModels');
+  if (!btn || btn.disabled) return;
+  if (!state.providers.length) { pushSystem('还没有供应商，请先添加。'); return; }
+
+  btn.disabled = true;
+  btn.textContent = '拉取中…';
+  try {
+    // 先把当前 DOM（含新填的 Key）落盘
+    const providers = collectProvidersFromDom();
+    await bridge.saveConfig({ providers, proxy: $('#proxy').value.trim() });
+    const cfg = await bridge.getConfig();
+    state.providers = cfg.providers;
+
+    let ok = 0;
+    const fails = [];
+    for (const p of state.providers) {
+      const card = document.querySelector(`.provider[data-id="${p.id}"]`);
+      const status = card && card.querySelector('[data-role="status"]');
+      if (status) status.textContent = '拉取中…';
+      try {
+        const models = await bridge.listModels(p.id);
+        p.models = Array.isArray(models) ? models : [];
+        ok++;
+        if (status) status.textContent = `共 ${models.length} 个模型`;
+      } catch (e) {
+        const msg = String(e.message || e).slice(0, 60);
+        if (status) status.textContent = '失败：' + msg;
+        fails.push(`${p.name}：${msg}`);
+      }
+    }
+
+    // 保存拉取到的模型列表
+    await bridge.saveConfig({
+      providers: state.providers.map((pp) => ({ id: pp.id, name: pp.name, baseUrl: pp.baseUrl, models: pp.models })),
+      proxy: $('#proxy').value.trim(),
+    });
+    renderProviders();
+    renderPlannerSelect();
+
+    const total = state.providers.reduce((a, pp) => a + (pp.models || []).length, 0);
+    if (fails.length) {
+      pushSystem(`拉取完成：成功 ${ok}/${state.providers.length} 家，共 ${total} 个模型。\n失败：${fails.join('；')}`);
+    } else {
+      pushSystem(`已拉取全部 ${ok} 家供应商的模型，共 ${total} 个模型。`);
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 一键拉取全部模型';
+  }
+}
+
 function addProvider() {
   state.providers.push({ id: uid(), name: '新供应商', baseUrl: '', hasKey: false, models: [] });
   renderProviders();
@@ -1408,13 +1928,34 @@ function openMemberModal(id) {
   sel.value = current;
   renderModelOptions(current, m ? m.model : '');
 
-  sel.onchange = () => renderModelOptions(sel.value, '');
+  sel.onchange = () => { renderModelOptions(sel.value, ''); updateMemberModelWarning(); };
   $('#mModelSelect').onchange = () => {
     $('#mModelCustom').hidden = $('#mModelSelect').value !== CUSTOM_MODEL;
+    updateMemberModelWarning();
   };
+  $('#mModelCustom').addEventListener('input', updateMemberModelWarning);
 
   $('#btnDeleteMember').style.display = m ? '' : 'none';
+  updateMemberModelWarning();
   $('#modalMember').hidden = false;
+}
+
+function updateMemberModelWarning() {
+  const el = $('#memberModelWarn');
+  if (!el) return;
+  const pid = $('#mProvider').value;
+  const modelSel = $('#mModelSelect');
+  const custom = $('#mModelCustom');
+  const model = (modelSel.value === '__custom__') ? custom.value.trim() : modelSel.value;
+  if (!model || !pid) { el.textContent = ''; el.hidden = true; return; }
+  const belongs = modelBelongsToProvider(pid, model);
+  if (belongs) {
+    el.textContent = '';
+    el.hidden = true;
+  } else {
+    el.textContent = `⚠ 模型「${model}」不在当前供应商的模型列表里，请更换供应商或模型`;
+    el.hidden = false;
+  }
 }
 
 /* ---------------- 事件 ---------------- */
@@ -1437,6 +1978,24 @@ function bindEvents() {
   bindAskModal();
   $('#btnSend').onclick = send;
   $('#btnStop').onclick = stopAll;
+  $('#btnPause').onclick = togglePause;
+  $('#btnClearKb').onclick = async () => {
+    if (!state.kb.files.length) { pushSystem('知识库已经是空的。'); return; }
+    const ok = await askUser({
+      title: '清空知识库',
+      message: `移除当前会话的全部 ${state.kb.files.length} 份资料？解析缓存也会一并清理。`,
+      danger: true,
+      okText: '清空',
+    });
+    if (!ok) return;
+    state.kb.files = [];
+    state.kbCache.clear();
+    renderKbList();
+    saveKbToSession();
+    pushSystem('已清空知识库。');
+  };
+  $('#allReasoning').onchange = (e) => setAllReasoning(e.target.checked);
+  $('#allVision').onchange = (e) => setAllVision(e.target.checked);
   $('#btnExport').onclick = doExport;
 
   // 点击输入区：先确保窗口被激活（原生对话框后可能失焦），再把光标放进去
@@ -1535,6 +2094,24 @@ function bindEvents() {
   $('#btnGroupPrompt').onclick = openGroupPrompt;
   $('#btnCancelGroupPrompt').onclick = () => { $('#modalGroupPrompt').hidden = true; };
   $('#btnSaveGroupPrompt').onclick = saveGroupPrompt;
+  $('#btnPlan').onclick = openPlanModal;
+  $('#btnPlanGenerate').onclick = () => runPlanner(null);
+  $('#btnPlanRegenerate').onclick = () => runPlanner($('#planFeedback').value.trim());
+  $('#btnPlanApply').onclick = applyPlan;
+  $('#btnPlanClose').onclick = () => { $('#modalPlan').hidden = true; };
+  $('#btnAddIssue').onclick = () => {
+    $('#issueEditId').value = ''; $('#issueTitle').value = ''; $('#issueBrief').value = ''; $('#issueAcceptance').value = '';
+    $('#modalIssue').hidden = false;
+  };
+  $('#btnCloseIssue').onclick = () => { $('#modalIssue').hidden = true; };
+  $('#btnSaveIssue').onclick = saveIssueEditor;
+  $('#btnDeleteIssue').onclick = () => {
+    const id = $('#issueEditId').value;
+    if (id) { state.issues = state.issues.filter((x) => x.id !== id); renderIssues(); saveKbToSession(); }
+    $('#modalIssue').hidden = true;
+  };
+  $('#btnCollapseIssues').onclick = () => toggleCollapse('issues');
+
   $('#btnCloseKb').onclick = () => { $('#modalKb').hidden = true; };
   const clearCacheBtn = $('#btnClearKbCache');
   if (clearCacheBtn) {
@@ -1562,6 +2139,7 @@ function bindEvents() {
   $('#btnCollapseMembers').onclick = () => toggleCollapse('members');
   $('#btnCloseSettings').onclick = () => { $('#modalSettings').hidden = true; };
   $('#btnAddProvider').onclick = addProvider;
+  $('#btnFetchAllModels').onclick = fetchAllModels;
 
   $('#btnAddKb').onclick = async () => {
     const paths = await bridge.kbPick();
@@ -1612,6 +2190,8 @@ function bindEvents() {
   $('#btnSaveSettings').onclick = async () => {
     const providers = collectProvidersFromDom();
     state.proxy = $('#proxy').value.trim();
+    state.settings.plannerProviderId = $('#plannerProvider').value || null;
+    state.settings.plannerModel = $('#plannerModel').value || null;
     state.kbCache.clear();
 
     await bridge.saveConfig({
@@ -1674,8 +2254,9 @@ function bindEvents() {
       okText: '清空',
     });
     if (!ok) return;
+    resetRunState();              // 关键：先中止在跑的请求，否则会一直卡在 running
     state.messages = [];
-    await bridge.clearChat();
+    try { await bridge.clearChat(); } catch { /* 忽略 */ }
     renderMessages();
     refreshUsageTotal();
     if (document.hasFocus()) $('#input').focus();
@@ -1690,6 +2271,7 @@ function saveKbToSession() {
       members: state.members,
       kb: state.kb,
       groupPrompt: state.groupPrompt,
+      issues: state.issues,
     });
   }
   persistConfig();
@@ -1729,6 +2311,52 @@ function renderKbList() {
 /* 右键菜单 + 关于信息（注入 app.js 的函数块） */
 
 /* ---------- 右键菜单 ---------- */
+/* ---------- 运行状态复位 ---------- */
+// 超过该时长没有任何数据就判定卡死；运行时读取，便于测试时覆盖
+function watchdogMs() {
+  const v = (typeof window !== 'undefined' && Number(window.__RUN_WATCHDOG_MS)) || 0;
+  return v > 0 ? v : 120000;
+}
+
+function resetRunState() {
+  for (const runId of Array.from(state.activeRuns || [])) {
+    try { bridge.abort(runId); } catch { /* 忽略 */ }
+  }
+  if (state.activeRuns && state.activeRuns.clear) state.activeRuns.clear();
+  state.running = false;
+  state.stopRequested = false;
+  state.paused = false;
+  const send = $('#btnSend');
+  if (send) send.disabled = false;
+  const stop = $('#btnStop');
+  if (stop) stop.hidden = true;
+  const pause = $('#btnPause');
+  if (pause) { pause.hidden = true; pause.textContent = '暂停'; pause.classList.remove('paused'); }
+}
+
+function pauseSleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/** 暂停闸门：暂停时不发起新的模型请求，但保留当前请求跑完 */
+async function pauseGate() {
+  while (state.paused && !state.stopRequested && state.running) {
+    await pauseSleep(150);
+  }
+}
+
+function togglePause() {
+  if (!state.running) return;
+  state.paused = !state.paused;
+  updatePauseButton();
+  pushSystem(state.paused ? '已暂停：当前这条说完后停住，点「继续」恢复。' : '已继续。');
+}
+
+function updatePauseButton() {
+  const b = $('#btnPause');
+  if (!b) return;
+  b.textContent = state.paused ? '继续' : '暂停';
+  b.classList.toggle('paused', state.paused);
+}
+
 function closeCtxMenu() {
   const m = document.querySelector('.ctx-menu');
   if (m) m.remove();
@@ -1889,14 +2517,44 @@ function openSettings() {
   $('#proxy').value = state.proxy || '';
   $('#safetyCap').value = safetyCap();
   renderProviders();
+  renderPlannerSelect();
+  syncBatchChecks();
   loadAppInfo();
   $('#modalSettings').hidden = false;
+}
+
+function syncBatchChecks() {
+  const members = state.members || [];
+  const allHigh = members.length > 0 && members.every((m) => (m.reasoning || 'off') === 'high');
+  const allVision = members.length > 0 && members.every((m) => m.supportsImages === true);
+  const r = $('#allReasoning');
+  const v = $('#allVision');
+  if (r) r.checked = allHigh;
+  if (v) v.checked = allVision;
+}
+
+function setAllReasoning(on) {
+  if (!state.members.length) { pushSystem('还没有成员'); return; }
+  for (const m of state.members) m.reasoning = on ? 'high' : 'off';
+  persistConfig();
+  renderAll();
+  syncBatchChecks();
+  pushSystem(on ? '已为所有成员开启高思考模式。' : '已关闭所有成员的思考模式。');
+}
+
+function setAllVision(on) {
+  if (!state.members.length) { pushSystem('还没有成员'); return; }
+  for (const m of state.members) m.supportsImages = on;
+  persistConfig();
+  renderAll();
+  syncBatchChecks();
+  pushSystem(on ? '已为所有成员开启看图模式。' : '已关闭所有成员的看图模式。');
 }
 
 /* ---------------- 导出 ---------------- */
 
 function buildMarkdown() {
-  const lines = ['# AI 群聊记录', '', `导出时间：${new Date().toLocaleString()}`, ''];
+  const lines = ['# 智库记录', '', `导出时间：${new Date().toLocaleString()}`, ''];
   for (const m of state.messages) {
     if (m.role === 'system') { lines.push(`> ${m.text}`, ''); continue; }
     const member = state.members.find((x) => x.id === m.memberId);
@@ -1905,6 +2563,18 @@ function buildMarkdown() {
     const u = usageOf(m);
     const tokens = u ? ` · ${u.total} tokens` : '';
     lines.push(`**${who}**${tag}${tokens}`, '', m.text || '', '');
+  }
+
+  if (state.issues && state.issues.length) {
+    lines.push('', '---', '', '# 议题卡', '');
+    for (const it of state.issues) {
+      const mark = it.status === 'done' ? '✅' : (it.status === 'active' ? '🔍' : '⏳');
+      lines.push(`## ${mark} ${it.title}`, '');
+      if (it.brief) lines.push(`- 要求：${it.brief}`);
+      if (it.acceptance) lines.push(`- 验收标准：${it.acceptance}`);
+      if (it.conclusion) lines.push(`- 结论：${it.conclusion}`);
+      lines.push('');
+    }
   }
   return lines.join('\n');
 }

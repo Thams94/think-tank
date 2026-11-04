@@ -39,7 +39,7 @@ textarea { resize: vertical; }
 
 .app {
   display: grid;
-  grid-template-columns: 200px 240px 1fr;
+  grid-template-columns: 200px 240px 1fr 260px;
   grid-template-rows: 100%;
   height: 100vh;
   overflow: hidden;
@@ -305,8 +305,8 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .members-head .head-label { flex: 1; }
 
 /* 会话栏收起：64px，只显示竖排标题 */
-.app.sessions-collapsed { grid-template-columns: 64px 240px 1fr; }
-.app.sessions-collapsed.members-collapsed { grid-template-columns: 64px 64px 1fr; }
+.app.sessions-collapsed { grid-template-columns: 64px 240px 1fr 260px; }
+.app.sessions-collapsed.members-collapsed { grid-template-columns: 64px 64px 1fr 260px; }
 
 .app.sessions-collapsed .sessions { padding: 12px 6px; }
 .app.sessions-collapsed .brand-text,
@@ -334,7 +334,7 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .app.sessions-collapsed .session .s-del { display: none; }
 
 /* 成员栏收起：64px，只显示头像 */
-.app.members-collapsed { grid-template-columns: 200px 64px 1fr; }
+.app.members-collapsed { grid-template-columns: 200px 64px 1fr 260px; }
 .app.members-collapsed .sidebar { padding: 12px 6px; }
 .app.members-collapsed .members-head .head-label,
 .app.members-collapsed .members-head .mini,
@@ -517,3 +517,74 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
 button.small { padding: 2px 8px; font-size: 11px; flex: none; }
+
+/* ---------- 议题卡第四栏 ---------- */
+.issues-panel { border-right: none; border-left: 1px solid var(--line); }
+.issue {
+  padding: 8px; border-radius: 10px; cursor: pointer;
+  border: 1px solid transparent; display: flex; flex-direction: column; gap: 4px;
+}
+.issue:hover { background: var(--panel-2); }
+.issue.status-active { background: #1e2a44; border-color: #2b3a5c; }
+.issue.status-done { opacity: .8; }
+.issue .issue-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.issue .name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue .muted { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.issue .conclusion { margin-top: 4px; font-size: 11px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 6px; }
+
+.app.issues-collapsed { grid-template-columns: 200px 240px 1fr 64px; }
+.app.sessions-collapsed.issues-collapsed { grid-template-columns: 64px 240px 1fr 64px; }
+.app.members-collapsed.issues-collapsed { grid-template-columns: 200px 64px 1fr 64px; }
+.app.sessions-collapsed.members-collapsed.issues-collapsed { grid-template-columns: 64px 64px 1fr 64px; }
+.app.issues-collapsed .issues-panel { padding: 12px 6px; }
+.app.issues-collapsed .issues-panel .head-label,
+.app.issues-collapsed .issues-panel .mini,
+.app.issues-collapsed .issues-panel .sidebar-foot { display: none; }
+.app.issues-collapsed .issues-panel .members-head { justify-content: center; }
+.app.issues-collapsed .issues-panel #issueList { display: none; }
+.app.issues-collapsed #btnCollapseIssues { margin-left: 0; }
+
+/* ---------- 策划组队弹窗 ---------- */
+.plan-draft {
+  margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px;
+  max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+}
+.plan-sec-h { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.plan-row { display: flex; gap: 8px; align-items: flex-start; }
+.plan-row .dot {
+  width: 24px; height: 24px; border-radius: 8px; display: grid; place-items: center;
+  font-size: 11px; font-weight: 700; color: #fff; flex: none;
+}
+.plan-meta { min-width: 0; }
+.plan-meta .name { font-weight: 600; font-size: 13px; }
+.plan-meta .muted { font-size: 11px; color: var(--muted); }
+.plan-issue { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
+.plan-issue .name { font-weight: 600; font-size: 13px; }
+.plan-issue .muted { font-size: 11px; color: var(--muted); }
+pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--muted); }
+
+/* ---------- 议题卡状态色 ---------- */
+.issue .pill.status-todo { background: rgba(255,255,255,.08); color: var(--muted); }
+.issue .pill.status-active { background: rgba(245,166,35,.18); color: #f5a623; }
+.issue .pill.status-done { background: rgba(70,194,163,.18); color: #46c2a3; }
+.issue .pill.status-skipped { background: rgba(255,255,255,.06); color: var(--muted); }
+.issue .issue-head { align-items: flex-start; }
+.issue .issue-head .name { flex: 1; min-width: 0; white-space: normal; }
+.issue .issue-edit {
+  flex: none; background: transparent; border: 0; color: var(--muted);
+  font-size: 12px; padding: 0 2px; cursor: pointer; opacity: 0; transition: opacity .12s;
+}
+.issue:hover .issue-edit { opacity: 1; }
+.issue .issue-edit:hover { color: var(--accent); }
+.issue.collapsed .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- 暂停按钮 ---------- */
+#btnPause.paused { color: #f5a623; border-color: #f5a623; }
+
+/* ---------- 成员批量设置 ---------- */
+.batch-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px;
+}
+.batch-row .inline { display: flex; align-items: center; gap: 6px; }
+

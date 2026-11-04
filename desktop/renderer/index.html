@@ -5,7 +5,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:;">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI 群聊</title>
+  <title>智库</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -13,9 +13,9 @@
     <!-- 第一栏：会话 -->
     <aside class="sessions">
       <div class="brand small">
-        <span class="logo">群</span>
+        <span class="logo">智</span>
         <div class="brand-text">
-          <div class="brand-title">AI 群聊</div>
+          <div class="brand-title">智库</div>
           <div class="brand-sub" id="connState">未配置</div>
         </div>
         <button class="collapse" id="btnCollapseSessions" title="收起 / 展开会话栏">⟨</button>
@@ -81,11 +81,24 @@
         <div class="composer-actions">
           <div class="quick" id="quickAt"></div>
           <button class="ghost kb-open-btn" id="btnKb" title="打开知识库">📚 知识库</button>
+          <button class="ghost" id="btnPause" hidden>暂停</button>
           <button class="ghost" id="btnStop" hidden>停止</button>
           <button class="primary" id="btnSend">发送</button>
         </div>
       </footer>
     </main>
+    <!-- 第四栏：议题卡 -->
+    <aside class="sidebar issues-panel" id="issuesCol">
+      <div class="section-title members-head">
+        <span class="head-label">议题卡 <span id="issueCount" class="pill">0</span></span>
+        <button class="mini" id="btnPlan" title="让策划模型自动组建团队并拆解议题">策划组队</button>
+        <button class="mini" id="btnAddIssue" title="手动添加一张议题卡">+ 添加</button>
+        <button class="collapse" id="btnCollapseIssues" title="收起 / 展开议题栏">⟩</button>
+      </div>
+      <div class="members" id="issueList"></div>
+    </aside>
+
+
   </div>
 
   <!-- 设置弹窗 -->
@@ -96,6 +109,7 @@
 
       <div id="providerList" class="providers"></div>
       <button class="ghost add-provider" id="btnAddProvider">+ 添加供应商</button>
+      <button class="ghost" id="btnFetchAllModels" style="margin-top:6px">🔄 一键拉取全部模型</button>
 
       <label>代理（留空 = 使用系统代理）
         <input id="proxy" placeholder="http://127.0.0.1:10808" />
@@ -103,6 +117,17 @@
       <label>安全上限（不限轮数时，最多连续发言多少次；到上限会提示「继续」）
         <input id="safetyCap" type="number" step="10" min="1" value="200" />
       </label>
+            <label>策划模型（负责组队、生成提示词、拆解议题）
+        <div class="row" style="gap:8px">
+          <select id="plannerProvider" style="flex:1"></select>
+          <select id="plannerModel" style="flex:1"></select>
+        </div>
+      </label>
+      <div class="batch-row">
+        <span class="muted">成员批量设置</span>
+        <label class="inline"><input type="checkbox" id="allReasoning" /> 全部高思考</label>
+        <label class="inline"><input type="checkbox" id="allVision" /> 全部看图</label>
+      </div>
       <div class="about-box">
         <div class="about-row">
           <span class="muted">版本</span>
@@ -140,7 +165,56 @@
     </div>
   </div>
 
-      <!-- 群组设定弹窗 -->
+        <!-- 策划组队弹窗 -->
+  <div class="modal" id="modalPlan" hidden>
+    <div class="modal-box wide">
+      <h2>策划组队</h2>
+      <p class="muted">把审核需求和资料发给策划模型，自动生成审核团队（人数 / 分工 / 提示词 / 模型）和议题卡。</p>
+      <label>审核需求与资料
+        <textarea id="planRequirement" rows="6" placeholder="例如：审核一个 Web 应用，重点看安全、逻辑、体验。以下是需求文档和代码……"></textarea>
+      </label>
+      <div class="muted" id="planKbHint"></div>
+      <div class="row">
+        <button class="primary" id="btnPlanGenerate">生成方案</button>
+        <span class="muted" id="planStatus" style="margin-left:auto"></span>
+      </div>
+      <div id="planDraft" class="plan-draft"></div>
+      <label>修改意见（按此重新生成）
+        <input id="planFeedback" placeholder="例如：减少一个成员，增加安全复核，主持人换成最强的模型" />
+      </label>
+      <div class="row">
+        <button class="ghost" id="btnPlanRegenerate">按意见重新生成</button>
+      </div>
+      <div class="modal-actions">
+        <button class="ghost" id="btnPlanClose">取消</button>
+        <button class="primary" id="btnPlanApply">确认并应用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 议题卡编辑弹窗 -->
+  <div class="modal" id="modalIssue" hidden>
+    <div class="modal-box">
+      <h2>议题卡</h2>
+      <input id="issueEditId" hidden />
+      <label>标题
+        <input id="issueTitle" placeholder="例如：权限校验" />
+      </label>
+      <label>审核要求
+        <textarea id="issueBrief" rows="3" placeholder="这张卡要审什么"></textarea>
+      </label>
+      <label>验收标准
+        <textarea id="issueAcceptance" rows="3" placeholder="怎样算通过"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button class="ghost danger" id="btnDeleteIssue">删除</button>
+        <button class="ghost" id="btnCloseIssue">取消</button>
+        <button class="primary" id="btnSaveIssue">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 群组设定弹窗 -->
   <div class="modal" id="modalGroupPrompt" hidden>
     <div class="modal-box">
       <h2>群组设定</h2>
@@ -167,6 +241,7 @@
       <div class="row">
         <button class="ghost" id="btnAddKb">+ 添加文件</button>
         <button class="ghost" id="btnAddKbFolder" hidden>+ 添加文件夹</button>
+        <button class="ghost danger" id="btnClearKb">清空全部</button>
       </div>
       <label>注入上限（字符）
         <input id="kbBudget" type="number" step="1000" min="1000" value="12000" />
@@ -194,6 +269,7 @@
       <label>模型
         <select id="mModelSelect"></select>
         <input id="mModelCustom" placeholder="自定义模型名" hidden />
+        <div class="muted" id="memberModelWarn" hidden style="color:#f5a623;font-size:11px;margin-top:4px"></div>
       </label>
       <label>人设提示词
         <textarea id="mPersona" rows="4" placeholder="例如：你是严格的代码审查员，优先指出风险和边界条件。"></textarea>

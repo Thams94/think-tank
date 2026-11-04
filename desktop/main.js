@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 
 // 数据目录固定为 %APPDATA%/ai-group-chat，
-// 否则打包后应用名变化（AI群聊）会指向另一个目录，看起来像"配置丢了"。
+// 否则打包后应用名变化会指向另一个目录，看起来像"配置丢了"。
 // AIGC_USER_DIR 仅用于测试隔离。
 if (process.env.AIGC_USER_DIR) {
   app.setPath('userData', process.env.AIGC_USER_DIR);
@@ -201,7 +201,15 @@ async function listModels(cfg, providerId, keyOverride) {
   const data = await res.json();
   const items = data.data || data.models || [];
   return items
-    .map((m) => (typeof m === 'string' ? m : m.id))
+    .map((m) => {
+      if (typeof m === 'string') return m.trim();
+      const id = m.id ? String(m.id).trim() : '';
+      const name = m.name ? String(m.name).trim() : '';
+      const display = m.display_name ? String(m.display_name).trim() : '';
+      // id 看起来像模型名（字母开头）就用 id；否则优先 name
+      if (id && /^[a-zA-Z][\w.\-+]*$/.test(id)) return id;
+      return name || display || id;
+    })
     .filter(Boolean)
     .sort();
 }
@@ -321,6 +329,64 @@ async function readStream(res, onDelta) {
   return { text: full, usage, finishReason, sawDone, truncated, interrupted, reasoningChars };
 }
 
+/** 非流式单次补全（供策划模型用，支持 JSON 结构化输出） */
+async function completeChat({ baseUrl, apiKey, model, messages, temperature, maxTokens, reasoning, json }) {
+  const base = normalizeBase(baseUrl);
+  const body = {
+    model,
+    messages,
+    temperature: typeof temperature === 'number' ? temperature : 0.3,
+  };
+  if (typeof maxTokens === 'number' && maxTokens > 0) body.max_tokens = maxTokens;
+  const wantReasoning = reasoning && reasoning !== 'off' ? String(reasoning) : null;
+  if (wantReasoning) body.reasoning_effort = wantReasoning;
+  if (json) body.response_format = { type: 'json_object' };
+
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+
+  let res = await httpFetch(`${base}/chat/completions`, {
+    method: 'POST', headers, body: JSON.stringify(body),
+  });
+
+  // 服务端不认 response_format / reasoning_effort：去掉后重试一次
+  if (!res.ok) {
+    let text = await res.text();
+    let retryBody = { ...body };
+    let shouldRetry = false;
+    if (body.response_format && /response_format|json_object|unsupported|invalid|unknown/i.test(text)) {
+      delete retryBody.response_format;
+      shouldRetry = true;
+    }
+    if (!shouldRetry && retryBody.reasoning_effort && /reasoning|thinking|unsupported|invalid|unknown/i.test(text)) {
+      delete retryBody.reasoning_effort;
+      shouldRetry = true;
+    }
+    if (shouldRetry) {
+      const r2 = await httpFetch(`${base}/chat/completions`, {
+        method: 'POST', headers, body: JSON.stringify(retryBody),
+      });
+      if (r2.ok) {
+        appendDiag({ kind: 'complete-retry', model });
+        res = r2;
+      } else {
+        text = await r2.text();
+      }
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}：${text.slice(0, 500)}`);
+  }
+
+  const data = await res.json();
+  const choice = data.choices?.[0] || {};
+  return {
+    text: choice.message?.content || '',
+    usage: data.usage || null,
+    finishReason: choice.finish_reason || null,
+  };
+}
+
 /* ---------------- 窗口 ---------------- */
 
 function createWindow() {
@@ -329,7 +395,7 @@ function createWindow() {
     height: 900,
     minWidth: 980,
     minHeight: 640,
-    title: 'AI 群聊',
+    title: '智库',
     backgroundColor: '#0f1117',
     autoHideMenuBar: true,
     webPreferences: {
@@ -1132,6 +1198,48 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
   };
 });
 
+/**
+ * 知识库摘要：供策划模型"读文件"用。
+ * 每个文档取头部 + （长文档）尾部，总预算受控，避免上下文爆炸。
+ */
+ipcMain.handle('kb:digest', async (_e, { files, budget = 40000 }) => {
+  const docs = (files || []).filter((f) => f.kind !== 'image' && isApprovedPath(f.path));
+  const images = (files || []).filter((f) => f.kind === 'image');
+  const out = [];
+  let used = 0;
+  const perFile = Math.max(1000, Math.min(4000, Math.floor(budget / Math.max(docs.length, 1))));
+
+  for (const f of docs) {
+    if (used >= budget) break;
+    try {
+      const text = String(await kbEnsureCache(f))
+        .replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      if (!text) {
+        out.push({ name: f.name, chars: 0, head: '', tail: '' });
+        continue;
+      }
+      const remain = budget - used;
+      let head = text.slice(0, Math.min(perFile, remain));
+      let tail = '';
+      const headUsed = head.length;
+      if (text.length > head.length + 400 && remain - headUsed > 400) {
+        tail = text.slice(-Math.min(1200, remain - headUsed));
+        if (tail.length < 100) tail = '';
+      }
+      used += head.length + tail.length;
+      out.push({ name: f.name, chars: text.length, head, tail });
+    } catch (e) {
+      out.push({ name: f.name, chars: 0, head: '', tail: '', error: String(e.message || e) });
+    }
+  }
+  return {
+    files: out,
+    images: images.map((f) => ({ name: f.name })),
+    used,
+    docCount: docs.length,
+  };
+});
+
 /* ---------------- 会话存储 ---------------- */
 
 function sessionPath(id) {
@@ -1182,7 +1290,7 @@ ipcMain.handle('sessions:list', () => {
   return { sessions: idx.sessions, activeId: idx.activeId };
 });
 
-ipcMain.handle('sessions:create', (_e, title, members, kb, groupPrompt) => {
+ipcMain.handle('sessions:create', (_e, title, members, kb, groupPrompt, issues) => {
   const idx = loadSessionIndex();
   const id = newId();
   const t = (title || '').trim() || '新会话';
@@ -1193,11 +1301,12 @@ ipcMain.handle('sessions:create', (_e, title, members, kb, groupPrompt) => {
   writeJson(sessionPath(id), {
     id, title: t, messages: [], members: snapshot, kb: kbSnapshot,
     groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : '',
+    issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : [],
   });
   idx.sessions.unshift({ id, title: t, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 });
   idx.activeId = id;
   saveSessionIndex(idx);
-  return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : '' };
+  return { id, title: t, messages: [], members: snapshot, kb: kbSnapshot, groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : '', issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : [] };
 });
 
 ipcMain.handle('sessions:load', (_e, id) => {
@@ -1209,7 +1318,7 @@ ipcMain.handle('sessions:load', (_e, id) => {
   return file;
 });
 
-ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt }) => {
+ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt, issues }) => {
   const idx = loadSessionIndex();
   const existing = readJson(sessionPath(id), { id, title: '新会话', messages: [] });
   const data = {
@@ -1221,6 +1330,7 @@ ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPr
       ? JSON.parse(JSON.stringify(kb))
       : (existing.kb || { enabled: true, budget: 12000, files: [] }),
     groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : (existing.groupPrompt || ''),
+    issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : (existing.issues || []),
     savedAt: Date.now(),
   };
   writeJson(sessionPath(id), data);
@@ -1287,7 +1397,9 @@ ipcMain.handle('chat:run', async (e, req) => {
       }
     }
 
-    const out = await streamChat({
+    appendDiag({ kind: 'chat_start', model: req.model, providerId: req.providerId, runId: req.runId });
+
+  const out = await streamChat({
       baseUrl: provider.baseUrl,
       apiKey,
       model: req.model,
@@ -1322,6 +1434,28 @@ ipcMain.handle('chat:run', async (e, req) => {
     return { ok: false, error: msg };
   } finally {
     running.delete(runId);
+  }
+});
+
+ipcMain.handle('plan:generate', async (_e, req) => {
+  const cfg = loadConfig();
+  const provider = getProvider(cfg, req.providerId);
+  if (!provider) return { ok: false, error: '没有可用的供应商，请先在设置里添加' };
+  const apiKey = decryptKey(provider.apiKeyEnc);
+  try {
+    const out = await completeChat({
+      baseUrl: provider.baseUrl,
+      apiKey,
+      model: req.model,
+      messages: req.messages,
+      temperature: 0.3,
+      maxTokens: req.maxTokens,
+      reasoning: 'off',
+      json: req.json !== false,
+    });
+    return { ok: true, text: out.text, usage: out.usage };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
   }
 });
 
