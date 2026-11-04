@@ -73,7 +73,7 @@ npm install
 npm start
 ```
 
-或直接下载安装包：[智库-安装程序-0.5.0.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.5.0/%E6%99%BA%E5%BA%93-%E5%AE%89%E8%A3%85%E7%A8%8B%E5%BA%8F-0.5.0.exe)（102 MB，Windows）
+或直接下载安装包：[Zhiku-Setup-0.5.0.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.5.0/Zhiku-Setup-0.5.0.exe)（102 MB，Windows）
 
 ### 配置
 
