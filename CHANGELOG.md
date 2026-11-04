@@ -1,5 +1,22 @@
 # 更新记录
 
+## v0.5.1（当前）
+
+修复一个会导致部分模型直接报 400 的问题。
+
+### 修复：对话必须以 user 结尾
+
+部分模型（Claude 系等）不支持 **assistant prefill**，要求对话最后一条必须是 `user` 消息。
+
+当同一个成员连续两次发言、或者最后一条正好是该成员自己的回复时，拼出来的上下文会以 `assistant` 结尾，于是请求被拒：
+
+```
+HTTP 400: This model does not support assistant message prefill.
+The conversation must end with a user message.
+```
+
+现在 `buildMessages` 会兜底：只要拼完的对话不是以 `user` 结尾，就自动补一条 `user`（"请继续。"）；空会话也会补一条。这样在主持人模式、轮流模式、重新生成、继续生成等所有路径下都不会再触发这个 400。
+
 ## v0.5.0（当前）
 
 **改名「智库」**（英文仓库名 `ai-group-chat` 不变）。新增「策划组队 + 议题卡审核」，把软件从"多模型聊天"升级成"审核工作台"。

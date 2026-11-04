@@ -706,6 +706,13 @@ function buildMessages(member, extra, kbText, searchText) {
   }
 
   if (extra) list.push({ role: 'user', content: extra });
+
+  // 有些模型（Claude 系等）不支持 assistant prefill，要求对话必须以 user 结尾。
+  // 同一成员连续发言、或最后一条正是该成员自己的回复时，这里会兜底补一条 user。
+  const last = list[list.length - 1];
+  if (!last || last.role !== 'user') {
+    list.push({ role: 'user', content: '请继续。' });
+  }
   return list;
 }
 
