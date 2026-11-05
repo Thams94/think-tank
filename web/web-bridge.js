@@ -11,8 +11,9 @@
 
   /* ================= IndexedDB ================= */
 
-  const DB_NAME = 'aigc-web';
+  const DB_NAME = 'think-tank-web';
   const DB_VER = 1;
+  const LEGACY_DB = 'aigc-web';
   let dbPromise = null;
 
   function openDb() {
@@ -29,6 +30,67 @@
       req.onerror = () => reject(req.error);
     });
     return dbPromise;
+  }
+
+  let legacyReady = null;
+
+  /** 把旧库 aigc-web 的数据搬到新库（仅当新库没有配置时执行一次） */
+  function migrateLegacyDb() {
+    if (legacyReady) return legacyReady;
+    legacyReady = (async () => {
+      try {
+        if (!indexedDB.databases) return;
+        const names = (await indexedDB.databases()).map((d) => d && d.name);
+        if (!names.includes(LEGACY_DB)) return;
+
+        const db = await openDb();
+        const hasConfig = await new Promise((res) => {
+          const t = db.transaction('kv', 'readonly');
+          const g = t.objectStore('kv').get('config');
+          g.onsuccess = () => res(!!g.result);
+          g.onerror = () => res(true);
+        });
+        if (hasConfig) return;
+
+        const oldDb = await new Promise((res) => {
+          const r = indexedDB.open(LEGACY_DB);
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => res(null);
+        });
+        if (!oldDb) return;
+
+        for (const store of ['kv', 'sessions', 'kbcache']) {
+          if (!oldDb.objectStoreNames.contains(store)) continue;
+          const dump = await new Promise((res) => {
+            try {
+              const t = oldDb.transaction(store, 'readonly');
+              const os = t.objectStore(store);
+              const keys = os.getAllKeys();
+              const vals = os.getAll();
+              t.oncomplete = () => res({ keys: keys.result, vals: vals.result });
+              t.onerror = () => res(null);
+            } catch { res(null); }
+          });
+          if (!dump || !dump.keys.length) continue;
+          await new Promise((res) => {
+            const t = db.transaction(store, 'readwrite');
+            const os = t.objectStore(store);
+            for (let i = 0; i < dump.keys.length; i++) {
+              if (store === 'sessions') os.put(dump.vals[i]);
+              else os.put(dump.vals[i], dump.keys[i]);
+            }
+            t.oncomplete = res;
+            t.onerror = res;
+            t.onabort = res;
+          });
+        }
+        oldDb.close();
+        console.log('[web-bridge] 已从旧库 aigc-web 迁移数据');
+      } catch (e) {
+        console.warn('[web-bridge] 旧库迁移失败（忽略）', e);
+      }
+    })();
+    return legacyReady;
   }
 
   function tx(store, mode, fn) {
@@ -113,6 +175,7 @@
   };
 
   async function loadConfig() {
+    await migrateLegacyDb();
     const cfg = (await idbGet('kv', 'config')) || {};
     return {
       providers: Array.isArray(cfg.providers) ? cfg.providers : [],
@@ -1003,7 +1066,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = defaultName || 'ai-group-chat.md';
+    a.download = defaultName || 'think-tank.md';
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
@@ -1024,7 +1087,7 @@
   /* ================= 暴露 ================= */
 
   const APP_VERSION = '0.4.6';
-  const REPO = 'https://github.com/Thams94/ai-group-chat';
+  const REPO = 'https://github.com/Thams94/think-tank';
 
   window.api = {
     appInfo: async () => ({

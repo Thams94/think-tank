@@ -287,8 +287,11 @@ function renderSessions() {
     const row = document.createElement('div');
     row.className = 'session' + (s.id === state.activeSessionId ? ' active' : '');
     row.dataset.sid = s.id;
+    const titleText = s.title || '未命名';
+    row.title = titleText;
     row.innerHTML = `
-      <div class="s-title" title="${escapeHtml(s.title || '未命名')}">${escapeHtml(s.title || '未命名')}</div>
+      <div class="s-initial">${escapeHtml(titleText.trim().slice(0, 1))}</div>
+      <div class="s-title" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</div>
       <div class="s-meta">${s.messageCount || 0} 条 · ${escapeHtml(fmtTime(s.updatedAt))}</div>
       <button class="s-del" title="删除会话">×</button>`;
 
@@ -498,7 +501,7 @@ function renderMembers() {
       <div class="dot" style="background:${escapeHtml(m.color || '#5b8def')}">${escapeHtml(initials(m.name))}</div>
       <div class="meta">
         <div class="name">${escapeHtml(m.name)}</div>
-        <div class="model">${escapeHtml(providerName(m.providerId))} · ${escapeHtml(m.model || '未选模型')}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}</div>
+        <div class="model" title="${escapeHtml(providerName(m.providerId))} · ${escapeHtml(m.model || '未选模型')}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}">${escapeHtml(m.model || '未选模型')}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}</div>
       </div>`;
     row.onclick = () => openMemberModal(m.id);
     box.appendChild(row);
@@ -1720,6 +1723,16 @@ function renderPlanDraft() {
   box.innerHTML = `
     <div class="plan-sec"><div class="plan-sec-h">团队（${team.length} 人）</div>${teamHtml}</div>
     <div class="plan-sec"><div class="plan-sec-h">议题卡（${issues.length} 张）</div>${issueHtml}</div>`;
+  updatePlanActions();
+}
+
+/** 没有方案时，禁用「修改意见 / 重新生成 / 确认并应用」 */
+function updatePlanActions() {
+  const hasPlan = (state.draftPlan.team || []).length > 0;
+  for (const sel of ['#planFeedback', '#btnPlanRegenerate', '#btnPlanApply']) {
+    const el = $(sel);
+    if (el) el.disabled = !hasPlan;
+  }
 }
 
 async function applyPlan() {
@@ -1771,6 +1784,7 @@ function openPlanModal() {
   $('#planStatus').textContent = state.draftPlan.team.length ? '已有方案草稿，可继续提意见或重新生成。' : '';
   updatePlanKbHint();
   renderPlanDraft();
+  updatePlanActions();
   $('#modalPlan').hidden = false;
 }
 
@@ -1957,12 +1971,18 @@ function renderProviders() {
     card.dataset.idx = String(idx);
     card.innerHTML = `
       <div class="prow">
-        <input class="pname" data-field="name" placeholder="名称" value="${escapeHtml(p.name || '')}" />
-        <input data-field="baseUrl" placeholder="https://api.example.com/v1" value="${escapeHtml(p.baseUrl || '')}" />
+        <label class="pfield"><span>名称</span>
+          <input class="pname" data-field="name" placeholder="例如：主供应商" value="${escapeHtml(p.name || '')}" />
+        </label>
+        <label class="pfield"><span>Base URL</span>
+          <input data-field="baseUrl" placeholder="https://api.example.com/v1" value="${escapeHtml(p.baseUrl || '')}" />
+        </label>
       </div>
       <div class="prow">
-        <input data-field="apiKey" type="password"
-               placeholder="${p.hasKey ? 'Key 已保存（留空则不修改）' : 'sk-...'}" />
+        <label class="pfield"><span>API Key</span>
+          <input data-field="apiKey" type="password"
+                 placeholder="${p.hasKey ? 'Key 已保存（留空则不修改）' : 'sk-...'}" />
+        </label>
       </div>
       <div class="actions">
         <button class="mini" data-act="fetch">拉取模型</button>
@@ -2350,7 +2370,7 @@ function bindEvents() {
     const it = state.issues.find((x) => x.id === $('#issueEditId').value);
     if (it) {
       it.status = 'done';
-      if (!it.conclusion) it.conclusion = '（手动标记完成）';
+      if (!it.conclusion) it.conclusion = '（手动标记为已审核）';
     }
     $('#modalIssue').hidden = true;
     renderIssues();
@@ -2363,9 +2383,21 @@ function bindEvents() {
     renderIssues();
     saveKbToSession();
   };
-  $('#btnDeleteIssue').onclick = () => {
+  $('#btnDeleteIssue').onclick = async () => {
     const id = $('#issueEditId').value;
-    if (id) { state.issues = state.issues.filter((x) => x.id !== id); renderIssues(); saveKbToSession(); }
+    if (!id) { $('#modalIssue').hidden = true; return; }
+    const it = state.issues.find((x) => x.id === id);
+    const ok = await askUser({
+      title: '删除议题卡',
+      message: `删除「${it ? it.title : '该议题'}」？删掉后不可恢复。`,
+      danger: true,
+      okText: '删除',
+    });
+    if (!ok) return;
+    state.issues = state.issues.filter((x) => x.id !== id);
+    if (state.currentIssueId === id) state.currentIssueId = null;
+    renderIssues();
+    saveKbToSession();
     $('#modalIssue').hidden = true;
   };
   $('#btnCollapseIssues').onclick = () => toggleCollapse('issues');
@@ -2448,6 +2480,8 @@ function bindEvents() {
   $('#btnSaveSettings').onclick = async () => {
     const providers = collectProvidersFromDom();
     state.proxy = $('#proxy').value.trim();
+    const capInput = Number($('#safetyCap').value);
+    state.settings.safetyCap = Number.isFinite(capInput) && capInput > 0 ? Math.round(capInput) : DEFAULT_SAFETY_CAP;
     state.settings.plannerProviderId = $('#plannerProvider').value || null;
     state.settings.plannerModel = $('#plannerModel').value || null;
     state.kbCache.clear();
@@ -2700,7 +2734,7 @@ async function loadAppInfo() {
   try {
     appInfoCache = typeof bridge.appInfo === 'function'
       ? await bridge.appInfo()
-      : { version: '—', engine: '', releases: 'https://github.com/Thams94/ai-group-chat/releases/latest' };
+      : { version: '—', engine: '', releases: 'https://github.com/Thams94/think-tank/releases/latest' };
   } catch {
     appInfoCache = { version: '—', engine: '', releases: '' };
   }
@@ -2844,7 +2878,7 @@ async function doExport() {
   try {
     const res = await bridge.exportMarkdown({
       content: buildMarkdown(),
-      defaultName: `ai-group-chat-${stamp}.md`,
+      defaultName: `think-tank-${stamp}.md`,
     });
     // 另存为对话框同样可能让窗口失焦
     await ensureWindowFocus();

@@ -1,4 +1,4 @@
-# 智库（多模型审核工作台）
+# 智库 Think Tank（多模型审核工作台）
 
 把不同的大模型拉进**同一个对话**，让它们围绕一个话题讨论、辩论、协作。
 支持**私密@**：你 @ 某个模型的私密消息，其他模型看不到。
@@ -18,7 +18,7 @@
 ## 运行
 
 ```powershell
-cd D:\Harness\ai-group-chat
+cd D:\Harness\think-tank
 start.cmd        # 推荐：会清掉 ELECTRON_RUN_AS_NODE 环境变量
 # 或
 npm start
@@ -102,9 +102,9 @@ node tools/mock-openai.js          # 监听 127.0.0.1:8799
 npm run dist
 ```
 
-产物：`release\智库-安装程序-<版本>.exe`（NSIS 安装向导，可自选安装目录，自动创建桌面/开始菜单快捷方式）。
+产物：`release\ThinkTank-Setup-<版本>.exe`（NSIS 安装向导，可自选安装目录，自动创建桌面/开始菜单快捷方式）。
 
-安装位置：`%LOCALAPPDATA%\Programs\ai-group-chat\`
+安装位置：`%LOCALAPPDATA%\Programs\think-tank\`
 卸载：设置 → 应用 → 智库，或运行安装目录下的 `Uninstall 智库.exe`。
 
 ### 免安装版
@@ -113,11 +113,11 @@ npm run dist
 npm run pack
 ```
 
-产物：`dist\智库-win32-x64\智库.exe`，整个文件夹一起拷走即可。
+产物：`dist\ThinkTank-win32-x64\ThinkTank.exe`，整个文件夹一起拷走即可。
 
 ### 数据目录
 
-固定在 `%APPDATA%\ai-group-chat`，开发版、免安装版、安装版共用同一份配置；
+固定在 `%APPDATA%\think-tank`，开发版、免安装版、安装版共用同一份配置；
 卸载程序默认**不删除**这份数据。
 
 ## 消息操作

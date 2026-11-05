@@ -6,6 +6,7 @@
         content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:;">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>智库</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27 x1=%270%27 y1=%270%27 x2=%270%27 y2=%271%27%3E%3Cstop offset=%270%27 stop-color=%27%233A5C9E%27/%3E%3Cstop offset=%271%27 stop-color=%27%2310182C%27/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%27100%27 height=%27100%27 rx=%2722%27 fill=%27url(%23g)%27/%3E%3Ctext x=%2750%27 y=%2771%27 font-size=%2752%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27Microsoft YaHei,sans-serif%27%3E智%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -120,8 +121,8 @@
       </label>
             <label>策划模型（负责组队、生成提示词、拆解议题）
         <div class="row" style="gap:8px">
-          <select id="plannerProvider" style="flex:1"></select>
-          <select id="plannerModel" style="flex:1"></select>
+          <label class="pfield" style="flex:1"><span>供应商</span><select id="plannerProvider"></select></label>
+          <label class="pfield" style="flex:1"><span>模型</span><select id="plannerModel"></select></label>
         </div>
       </label>
       <div class="batch-row">
@@ -202,14 +203,14 @@
         <input id="issueTitle" placeholder="例如：权限校验" />
       </label>
       <label>审核要求
-        <textarea id="issueBrief" rows="3" placeholder="这张卡要审什么"></textarea>
+        <textarea id="issueBrief" rows="5" placeholder="这张卡要审什么"></textarea>
       </label>
       <label>验收标准
-        <textarea id="issueAcceptance" rows="3" placeholder="怎样算通过"></textarea>
+        <textarea id="issueAcceptance" rows="5" placeholder="怎样算通过"></textarea>
       </label>
       <div class="modal-actions">
         <button class="ghost danger" id="btnDeleteIssue">删除</button>
-        <button class="ghost" id="btnMarkIssueDone">标记完成</button>
+        <button class="ghost" id="btnMarkIssueDone">标记为已审核</button>
         <button class="ghost" id="btnResetIssue">重置为未审核</button>
         <button class="ghost" id="btnCloseIssue">取消</button>
         <button class="primary" id="btnSaveIssue">保存</button>

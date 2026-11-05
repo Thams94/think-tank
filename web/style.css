@@ -39,7 +39,11 @@ textarea { resize: vertical; }
 
 .app {
   display: grid;
-  grid-template-columns: 200px 240px 1fr 260px;
+  --w-sessions: 200px;
+  --w-members: 232px;
+  --w-issues: 240px;
+  grid-template-columns:
+    var(--w-sessions) var(--w-members) minmax(0, 1fr) var(--w-issues);
   grid-template-rows: 100%;
   height: 100vh;
   overflow: hidden;
@@ -196,7 +200,8 @@ textarea { resize: vertical; }
 .modal-box label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 .row { display: flex; gap: 10px; align-items: center; }
 .half { flex: 1; }
-.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; flex-wrap: wrap; }
+.modal-actions button { white-space: nowrap; }
 .modal-actions .primary { margin-left: 0; }
 .muted { color: var(--muted); font-size: 12px; }
 
@@ -302,11 +307,14 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 }
 .collapse:hover { color: var(--text); border-color: var(--accent); }
 .members-head { gap: 6px; }
-.members-head .head-label { flex: 1; }
+.members-head .head-label {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* 会话栏收起：64px，只显示竖排标题 */
-.app.sessions-collapsed { grid-template-columns: 64px 240px 1fr 260px; }
-.app.sessions-collapsed.members-collapsed { grid-template-columns: 64px 64px 1fr 260px; }
+.app.sessions-collapsed { --w-sessions: 64px; }
+.app.sessions-collapsed.members-collapsed { --w-sessions: 64px; --w-members: 64px; }
 
 .app.sessions-collapsed .sessions { padding: 12px 6px; }
 .app.sessions-collapsed .brand-text,
@@ -320,30 +328,25 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   max-height: 190px;
   overflow: hidden;
 }
-.app.sessions-collapsed .session .s-title {
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-height: 170px;
-}
+.app.sessions-collapsed .session .s-title { display: none; }
 .app.sessions-collapsed .session .s-meta,
 .app.sessions-collapsed .session .s-del { display: none; }
 
 /* 成员栏收起：64px，只显示头像 */
-.app.members-collapsed { grid-template-columns: 200px 64px 1fr 260px; }
+.app.members-collapsed { --w-members: 64px; }
 .app.members-collapsed .sidebar { padding: 12px 6px; }
-.app.members-collapsed .members-head .head-label,
-.app.members-collapsed .members-head .mini { display: none; }
-.app.members-collapsed .members-head { justify-content: center; }
+.app.members-collapsed .sidebar:not(.issues-panel) .members-head .head-label,
+.app.members-collapsed .sidebar:not(.issues-panel) .members-head .mini { display: none; }
+.app.members-collapsed .sidebar:not(.issues-panel) .members-head { justify-content: center; }
 .app.members-collapsed .member { justify-content: center; padding: 6px 0; }
 .app.members-collapsed .member .meta { display: none; }
 .app.members-collapsed .member .dot { width: 32px; height: 32px; font-size: 13px; }
 
 /* ---------- 窄布局防挤压 ---------- */
-.topbar { gap: 10px; overflow: hidden; }
+.topbar { gap: 10px; flex-wrap: wrap; row-gap: 8px; }
+/* 空间不足时，让「提示文字 + 导出」一起落到第二行，而不是只剩一个按钮 */
+.topbar .hint { order: 9; flex: 1 1 220px; }
+#btnExport { order: 10; }
 .topbar .mode-group { flex: none; }
 .mode { white-space: nowrap; }
 .rounds { flex: none; white-space: nowrap; }
@@ -351,7 +354,7 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 #usageTotal { flex: none; white-space: nowrap; }
 #btnExport { flex: none; white-space: nowrap; margin-left: 8px; }
 .topbar .hint {
-  min-width: 0; flex: 1;
+  min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -528,12 +531,16 @@ button.small { padding: 2px 8px; font-size: 11px; flex: none; }
 .issue .issue-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .issue .name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .issue .muted { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-.issue .conclusion { margin-top: 4px; font-size: 11px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 6px; }
+.issue .conclusion {
+  margin-top: 6px; font-size: 12px; color: var(--text); line-height: 1.5;
+  background: rgba(91, 141, 239, .10); border-left: 3px solid var(--accent);
+  padding: 5px 8px; border-radius: 0 6px 6px 0; white-space: pre-wrap; word-break: break-word;
+}
 
-.app.issues-collapsed { grid-template-columns: 200px 240px 1fr 64px; }
-.app.sessions-collapsed.issues-collapsed { grid-template-columns: 64px 240px 1fr 64px; }
-.app.members-collapsed.issues-collapsed { grid-template-columns: 200px 64px 1fr 64px; }
-.app.sessions-collapsed.members-collapsed.issues-collapsed { grid-template-columns: 64px 64px 1fr 64px; }
+.app.issues-collapsed { --w-issues: 64px; }
+.app.sessions-collapsed.issues-collapsed { --w-sessions: 64px; --w-issues: 64px; }
+.app.members-collapsed.issues-collapsed { --w-members: 64px; --w-issues: 64px; }
+.app.sessions-collapsed.members-collapsed.issues-collapsed { --w-sessions: 64px; --w-members: 64px; --w-issues: 64px; }
 .app.issues-collapsed .issues-panel { padding: 12px 6px; }
 .app.issues-collapsed .issues-panel .head-label,
 .app.issues-collapsed .issues-panel .mini,
@@ -574,7 +581,10 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: 
 }
 .issue:hover .issue-edit { opacity: 1; }
 .issue .issue-edit:hover { color: var(--accent); }
-.issue.collapsed .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.issue.collapsed .name {
+  white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
 
 /* ---------- 暂停按钮 ---------- */
 #btnPause.paused { color: #f5a623; border-color: #f5a623; }
@@ -594,5 +604,36 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: 
 .app.sessions-collapsed .sessions .sidebar-foot button,
 .app.members-collapsed .sidebar:not(.issues-panel) .sidebar-foot button {
   padding: 8px 0; font-size: 16px; line-height: 1; min-width: 0;
+}
+
+/* ---------- 收起会话栏：首字图标 ---------- */
+.s-initial { display: none; }
+.app.sessions-collapsed .session .s-initial {
+  display: grid;
+  width: 30px; height: 30px; border-radius: 9px;
+  place-items: center; font-weight: 700; font-size: 13px;
+  background: var(--panel-2); color: var(--text); margin: 0 auto;
+}
+
+/* ---------- 字段标签 ---------- */
+.pfield { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.pfield > span { font-size: 11px; color: var(--muted); }
+.pfield > input, .pfield > select { width: 100%; }
+
+/* ---------- 气泡防横向溢出 ---------- */
+.bubble { overflow-wrap: anywhere; word-break: break-word; }
+.bubble.md table { display: block; max-width: 100%; overflow-x: auto; }
+.bubble.md pre { max-width: 100%; overflow-x: auto; }
+
+/* ---------- 禁用态 ---------- */
+button:disabled, input:disabled, select:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---------- 窄屏四栏收窄（≤1180） ---------- */
+@media (max-width: 1180px) {
+  .app {
+    --w-sessions: 168px;
+    --w-members: 196px;
+    --w-issues: 208px;
+  }
 }
 

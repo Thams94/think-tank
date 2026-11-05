@@ -1,4 +1,4 @@
-# 智库 · 多模型审核工作台
+# 智库 Think Tank · 多模型审核工作台
 
 **把多个大模型拉进同一个对话**，让它们讨论、辩论、协作；再用「策划组队 + 议题卡」把它们组织成一支审核团队，逐个议题审完并归档结论。
 
@@ -28,7 +28,7 @@
 | **网页版**（推荐） | [`web/`](web/) | 纯静态、无需安装、手机电脑都能用、数据存浏览器本地 |
 | **桌面版** | [`desktop/`](desktop/) | Windows 应用（Electron），能读本地文件夹、系统级 OCR、Key 用 DPAPI 加密 |
 
-> 在线体验：https://thams94.github.io/ai-group-chat/
+> 在线体验：https://thams94.github.io/think-tank/
 
 ## 功能
 
@@ -73,7 +73,7 @@ npm install
 npm start
 ```
 
-或直接下载安装包：[Zhiku-Setup-0.5.4.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.5.4/Zhiku-Setup-0.5.4.exe)（102 MB，Windows）
+或直接下载安装包：[ThinkTank-Setup-0.5.7.exe](https://github.com/Thams94/think-tank/releases/download/v0.5.7/ThinkTank-Setup-0.5.7.exe)（102 MB，Windows）
 
 ### 配置
 

@@ -1,4 +1,4 @@
-# AI Group Chat · Multi-Model Discussion
+# Think Tank · Multi-Model Discussion
 
 Put **several LLMs into one conversation** so they can discuss, debate, and cross-check each other — instead of asking one model at a time.
 
@@ -28,7 +28,7 @@ This tool lets you put models from different vendors in the same "group chat" so
 | **Web** (recommended) | [`web/`](web/) | Pure static, no install, works on desktop and mobile, data stays in your browser |
 | **Desktop** | [`desktop/`](desktop/) | Windows app (Electron): local folders, native OCR, DPAPI-encrypted keys |
 
-> Live demo: https://thams94.github.io/ai-group-chat/
+> Live demo: https://thams94.github.io/think-tank/
 
 ## Features
 
@@ -68,7 +68,7 @@ npm install
 npm start
 ```
 
-Or grab the installer: [AIGroupChat-Setup-0.3.8.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.3.8/AIGroupChat-Setup-0.3.8.exe) (102 MB, Windows).
+Or grab the installer: [AIGroupChat-Setup-0.3.8.exe](https://github.com/Thams94/think-tank/releases/download/v0.3.8/AIGroupChat-Setup-0.3.8.exe) (102 MB, Windows).
 
 ### Configure
 

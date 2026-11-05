@@ -5,13 +5,23 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 
-// 数据目录固定为 %APPDATA%/ai-group-chat，
+// 数据目录固定为 %APPDATA%/think-tank，
 // 否则打包后应用名变化会指向另一个目录，看起来像"配置丢了"。
-// AIGC_USER_DIR 仅用于测试隔离。
-if (process.env.AIGC_USER_DIR) {
-  app.setPath('userData', process.env.AIGC_USER_DIR);
+// 旧版目录 %APPDATA%/ai-group-chat 会在首次启动时复制过来（旧目录保留作备份）。
+// THINKTANK_USER_DIR（兼容旧的 AIGC_USER_DIR）仅用于测试隔离。
+const APP_DATA_DIR = path.join(app.getPath('appData'), 'think-tank');
+const LEGACY_DATA_DIR = path.join(app.getPath('appData'), 'ai-group-chat');
+const DATA_DIR_OVERRIDE = process.env.THINKTANK_USER_DIR || process.env.AIGC_USER_DIR;
+
+if (DATA_DIR_OVERRIDE) {
+  app.setPath('userData', DATA_DIR_OVERRIDE);
 } else {
-  app.setPath('userData', path.join(app.getPath('appData'), 'ai-group-chat'));
+  try {
+    if (!fs.existsSync(APP_DATA_DIR) && fs.existsSync(LEGACY_DATA_DIR)) {
+      fs.cpSync(LEGACY_DATA_DIR, APP_DATA_DIR, { recursive: true });
+    }
+  } catch { /* 迁移失败就用新目录，不阻塞启动 */ }
+  app.setPath('userData', APP_DATA_DIR);
 }
 
 const USER_DIR = app.getPath('userData');
@@ -907,8 +917,8 @@ ipcMain.handle('app:info', () => ({
   platform: process.platform,
   arch: process.arch,
   dataDir: USER_DIR,
-  repo: 'https://github.com/Thams94/ai-group-chat',
-  releases: 'https://github.com/Thams94/ai-group-chat/releases/latest',
+  repo: 'https://github.com/Thams94/think-tank',
+  releases: 'https://github.com/Thams94/think-tank/releases/latest',
 }));
 
 ipcMain.handle('app:openPath', (_e, target) => {
@@ -1519,7 +1529,7 @@ ipcMain.handle('export:markdown', async (_e, { content, defaultName }) => {
   const win = BrowserWindow.getAllWindows()[0] || null;
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     title: '导出讨论记录',
-    defaultPath: defaultName || 'ai-group-chat.md',
+    defaultPath: defaultName || 'think-tank.md',
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
   // 原生存取对话框关闭后，窗口可能处于"未激活"状态，主动拉回前台
