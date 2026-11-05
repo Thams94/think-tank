@@ -1042,6 +1042,7 @@
     getConfig, saveConfig,
     listModels,
     generatePlan,
+    decideModerator: generatePlan,
     run, abort, onDelta,
     kbPick, kbIndex, kbContext, kbDigest,
     kbAddFiles: async (files) => registerFiles(files),

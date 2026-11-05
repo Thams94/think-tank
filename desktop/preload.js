@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('api', {
   // 单次生成
   run: (req) => ipcRenderer.invoke('chat:run', req),
   generatePlan: (req) => ipcRenderer.invoke('plan:generate', req),
+  decideModerator: (req) => ipcRenderer.invoke('plan:generate', req),
   abort: (runId) => ipcRenderer.invoke('chat:abort', runId),
 
   onDelta: (cb) => {

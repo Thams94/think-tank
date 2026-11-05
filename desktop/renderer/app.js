@@ -1233,12 +1233,54 @@ function pickModerator(enabled) {
   return enabled[0] || state.members[0];
 }
 
+async function askModerator(moderator, instruction, names) {
+  const provider = providerOf(moderator);
+  const msgs = buildMessages(moderator, instruction);
+
+  // 优先走非流式 JSON 模式：结构化决定比自由文本可靠得多
+  if (provider && typeof bridge.decideModerator === 'function') {
+    try {
+      const res = await bridge.decideModerator({
+        providerId: provider.id,
+        model: moderator.model,
+        messages: msgs,
+        json: true,
+        maxTokens: 1500,
+      });
+      if (res && res.ok && res.text) {
+        const p = parsePlan(res.text, names);
+        if (p.valid) return p;
+      }
+    } catch { /* 回退到流式 */ }
+  }
+  return parsePlan(await runSilent(moderator, instruction), names);
+}
+
+function resolveSpeaker(name, pool) {
+  if (!name) return null;
+  const exact = pool.find((m) => m.name === name);
+  if (exact) return exact;
+  return pool.find((m) => m.name.includes(name) || name.includes(m.name)) || null;
+}
+
 async function runModerated(rounds, enabled) {
   const moderator = pickModerator(enabled);
-  if (!moderator || !moderator.model) { pushSystem('主持人没有配置模型'); return ''; }
-  const names = enabled.map((m) => m.name);
+  if (!moderator || !moderator.model) {
+    pushSystem('主持人没有配置模型');
+    return { finished: false, conclusion: '' };
+  }
+
+  // 主持人只负责组织，不参与发言
+  const pool = enabled.filter((m) => m.id !== moderator.id);
+  if (!pool.length) {
+    pushSystem('除了主持人之外没有可发言的成员，请先添加审核成员。');
+    return { finished: false, conclusion: '' };
+  }
+
+  const names = pool.map((m) => m.name);
   const unlimited = rounds === 0;
   let conclusion = '';
+  let finished = false;
 
   const curIssue = state.currentIssueId ? state.issues.find((x) => x.id === state.currentIssueId) : null;
   const issueLine = curIssue
@@ -1251,6 +1293,10 @@ async function runModerated(rounds, enabled) {
 
   const cap = safetyCap();
   let i = 0;
+  let invalidStreak = 0;
+  let lastSpeakerId = null;
+  let sameStreak = 0;
+
   while (!state.stopRequested && (unlimited || i < rounds) && i < cap) {
     const instruction = [
       '现在轮到你当主持人。',
@@ -1261,24 +1307,64 @@ async function runModerated(rounds, enabled) {
       '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true,"conclusion":"结论"}',
     ].filter(Boolean).join('\n');
 
-    const plan = parsePlan(await runSilent(moderator, instruction), names);
+    let plan = await askModerator(moderator, instruction, names);
+
+    // 解析失败：用更严格的指令重试一次
+    if (!plan.valid) {
+      const strict = '只输出一行 JSON，不要任何解释、不要 markdown、不要前后缀。'
+        + '格式只有两种：{"next":"成员名","prompt":"提示"} 或 {"done":true,"conclusion":"结论"}。'
+        + `成员名只能是：${names.join('、')}。`;
+      plan = await askModerator(moderator, strict, names);
+    }
 
     if (plan.done) {
       conclusion = plan.conclusion || '';
+      finished = true;
       pushSystem(`主持人 ${moderator.name} 宣布讨论结束。${conclusion ? '\n\n结论：' + conclusion : ''}`);
       break;
     }
 
-    const next = findMember(plan.next) || enabled[i % enabled.length];
+    if (!plan.valid) {
+      invalidStreak++;
+      if (invalidStreak >= 3) {
+        pushSystem('主持人连续 3 次没有给出可解析的决定，已暂停本议题。可以点「继续」重试，或在议题卡里点「标记完成」。');
+        break;
+      }
+    } else {
+      invalidStreak = 0;
+    }
+
+    let next = resolveSpeaker(plan.next, pool);
+    if (!next) {
+      const others = pool.filter((m) => m.id !== lastSpeakerId);
+      const arr = others.length ? others : pool;
+      next = arr[i % arr.length];
+    }
+
+    // 防止同一个人连续霸占：连续 3 次同一人强制换人
+    if (lastSpeakerId && next.id === lastSpeakerId) {
+      sameStreak++;
+      if (sameStreak >= 3) {
+        const others = pool.filter((m) => m.id !== lastSpeakerId);
+        if (others.length) {
+          next = others[i % others.length];
+          sameStreak = 0;
+        }
+      }
+    } else {
+      sameStreak = 0;
+    }
+
+    lastSpeakerId = next.id;
     pushSystem(`第 ${i + 1} 次｜主持人 ${moderator.name}：请「${next.name}」发言 — ${plan.prompt || '（无提示）'}`);
     await runMember(next, { extra: plan.prompt ? `【主持人提示】${plan.prompt}` : '' });
     i++;
   }
 
-  if (i >= cap && !state.stopRequested) {
+  if (i >= cap && !state.stopRequested && !finished) {
     pushContinuePrompt(cap);
   }
-  return conclusion;
+  return { finished, conclusion };
 }
 
 function parsePlan(text, names) {
@@ -1289,9 +1375,15 @@ function parsePlan(text, names) {
     const next = String(obj.next || obj.name || '');
     // 主持人可以用 done:true 或 next:"结束" 来收尾
     const done = obj.done === true || /^(结束|停止|收尾|end|stop|finish)$/i.test(next);
-    return { done, next, prompt: obj.prompt || obj.question || '', conclusion: obj.conclusion || obj.summary || '' };
+    return {
+      done, next,
+      prompt: obj.prompt || obj.question || '',
+      conclusion: obj.conclusion || obj.summary || '',
+      valid: true,
+    };
   } catch {
-    return { done: false, next: names[0] || '', prompt: '' };
+    // 解析失败不要把 names[0] 当发言人（可能就是主持人自己）
+    return { done: false, next: '', prompt: '', conclusion: '', valid: false };
   }
 }
 
@@ -1657,6 +1749,11 @@ function renderIssues() {
       openIssueEditor(it.id);
     };
     box.appendChild(row);
+
+    // 当前正在审核的卡自动滚到可视区域
+    if (it.status === 'active') {
+      try { row.scrollIntoView({ block: 'nearest' }); } catch { /* 忽略 */ }
+    }
   }
 }
 
@@ -1695,14 +1792,25 @@ async function runIssueQueue(enabled, rounds) {
     state.currentIssueId = issue.id;
     renderIssues();
     pushSystem(`━━ 开始审核议题：${issue.title} ━━`);
-    const conclusion = await runModerated(rounds, enabled);
-    issue.conclusion = conclusion || '';
-    issue.status = 'done';
-    state.currentIssueId = null;
-    renderIssues();
-    persistChat();
-    if (issue.conclusion) pushSystem(`✅ 议题完成：${issue.title}\n\n结论：${issue.conclusion}`);
-    else pushSystem(`✅ 议题完成：${issue.title}（无结论）`);
+
+    const r = await runModerated(rounds, enabled);
+
+    if (r.finished) {
+      issue.conclusion = r.conclusion || '';
+      issue.status = 'done';
+      state.currentIssueId = null;
+      renderIssues();
+      persistChat();
+      if (issue.conclusion) pushSystem(`✅ 议题完成：${issue.title}\n\n结论：${issue.conclusion}`);
+      else pushSystem(`✅ 议题完成：${issue.title}（无结论）`);
+    } else {
+      // 主持人没有宣布完成：保持 active，停在当前议题，不硬推进
+      state.currentIssueId = issue.id;
+      renderIssues();
+      persistChat();
+      pushSystem(`议题「${issue.title}」尚未完成（主持人未宣布结束）。点「继续」接着审，或在议题卡里点「标记完成」。`);
+      break;
+    }
   }
 }
 
@@ -2112,6 +2220,23 @@ function bindEvents() {
   };
   $('#btnCloseIssue').onclick = () => { $('#modalIssue').hidden = true; };
   $('#btnSaveIssue').onclick = saveIssueEditor;
+  $('#btnMarkIssueDone').onclick = () => {
+    const it = state.issues.find((x) => x.id === $('#issueEditId').value);
+    if (it) {
+      it.status = 'done';
+      if (!it.conclusion) it.conclusion = '（手动标记完成）';
+    }
+    $('#modalIssue').hidden = true;
+    renderIssues();
+    saveKbToSession();
+  };
+  $('#btnResetIssue').onclick = () => {
+    const it = state.issues.find((x) => x.id === $('#issueEditId').value);
+    if (it) { it.status = 'todo'; it.conclusion = ''; }
+    $('#modalIssue').hidden = true;
+    renderIssues();
+    saveKbToSession();
+  };
   $('#btnDeleteIssue').onclick = () => {
     const id = $('#issueEditId').value;
     if (id) { state.issues = state.issues.filter((x) => x.id !== id); renderIssues(); saveKbToSession(); }
