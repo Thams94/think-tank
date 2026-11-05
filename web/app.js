@@ -435,6 +435,46 @@ function renderAll() {
   $('#rounds').value = (rv === undefined || rv === null || rv === '') ? 1 : rv;
   refreshConnState();
   refreshUsageTotal();
+  updateResumeButton();
+}
+
+/** 有未完成议题且当前没在跑时，显示常驻「继续审核」 */
+function updateResumeButton() {
+  const b = $('#btnResumeIssue');
+  if (!b) return;
+  const hasOpen = (state.issues || []).some((i) => i.status === 'todo' || i.status === 'active');
+  b.hidden = !(hasOpen && !state.running);
+}
+
+async function resumeIssueQueue() {
+  if (state.running) return;
+  const enabled = state.members.filter((m) => m.enabled !== false && m.model && providerOf(m));
+  if (!enabled.length) { pushSystem('没有可用成员：请在成员设置里选择供应商和模型'); return; }
+
+  state.running = true;
+  state.stopRequested = false;
+  state.paused = false;
+  $('#btnSend').disabled = true;
+  $('#btnStop').hidden = false;
+  const bp = $('#btnPause');
+  if (bp) { bp.hidden = false; bp.textContent = '暂停'; bp.classList.remove('paused'); }
+  updateResumeButton();
+
+  try {
+    await runIssueQueue(enabled, Math.max(0, Number(state.settings.rounds) || 0));
+  } catch (e) {
+    pushSystem('出错：' + String(e.message || e));
+  } finally {
+    state.running = false;
+    state.stopRequested = false;
+    state.paused = false;
+    $('#btnSend').disabled = false;
+    $('#btnStop').hidden = true;
+    const bp2 = $('#btnPause');
+    if (bp2) { bp2.hidden = true; bp2.textContent = '暂停'; bp2.classList.remove('paused'); }
+    persistChat();
+    updateResumeButton();
+  }
 }
 
 function refreshConnState() {
@@ -1116,6 +1156,7 @@ async function send() {
     const bp = $('#btnPause');
     if (bp) { bp.hidden = true; bp.textContent = '暂停'; bp.classList.remove('paused'); }
     persistChat();
+    updateResumeButton();
   }
 }
 
@@ -1209,6 +1250,7 @@ async function onResumeAction(m) {
     const bp = $('#btnPause');
     if (bp) { bp.hidden = true; bp.textContent = '暂停'; bp.classList.remove('paused'); }
     persistChat();
+    updateResumeButton();
   }
 }
 
@@ -2177,6 +2219,7 @@ function bindEvents() {
   $('#btnSend').onclick = send;
   $('#btnStop').onclick = stopAll;
   $('#btnPause').onclick = togglePause;
+  $('#btnResumeIssue').onclick = resumeIssueQueue;
   $('#btnClearKb').onclick = async () => {
     if (!state.kb.files.length) { pushSystem('知识库已经是空的。'); return; }
     const ok = await askUser({
@@ -2547,6 +2590,7 @@ function resetRunState() {
   if (stop) stop.hidden = true;
   const pause = $('#btnPause');
   if (pause) { pause.hidden = true; pause.textContent = '暂停'; pause.classList.remove('paused'); }
+  if (typeof updateResumeButton === 'function') updateResumeButton();
 }
 
 function pauseSleep(ms) { return new Promise((r) => setTimeout(r, ms)); }

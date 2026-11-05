@@ -587,12 +587,12 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: 
 .batch-row .inline { display: flex; align-items: center; gap: 6px; }
 
 /* ---------- 收起侧栏时底部按钮只留图标 ---------- */
-.app.sessions-collapsed .sidebar-foot .txt,
-.app.members-collapsed .sidebar-foot .txt { display: none; }
-.app.sessions-collapsed .sidebar-foot,
-.app.members-collapsed .sidebar-foot { justify-content: center; }
-.app.sessions-collapsed .sidebar-foot button,
-.app.members-collapsed .sidebar-foot button {
+.app.sessions-collapsed .sessions .sidebar-foot .txt,
+.app.members-collapsed .sidebar:not(.issues-panel) .sidebar-foot .txt { display: none; }
+.app.sessions-collapsed .sessions .sidebar-foot,
+.app.members-collapsed .sidebar:not(.issues-panel) .sidebar-foot { justify-content: center; }
+.app.sessions-collapsed .sessions .sidebar-foot button,
+.app.members-collapsed .sidebar:not(.issues-panel) .sidebar-foot button {
   padding: 8px 0; font-size: 16px; line-height: 1; min-width: 0;
 }
 

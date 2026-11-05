@@ -1,6 +1,6 @@
 {
   "name": "ai-group-chat",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "智库：多模型审核工作台，自动组建审核团队并按议题逐项推进",
   "main": "main.js",
   "author": "local",

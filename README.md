@@ -73,7 +73,7 @@ npm install
 npm start
 ```
 
-或直接下载安装包：[Zhiku-Setup-0.5.3.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.5.3/Zhiku-Setup-0.5.3.exe)（102 MB，Windows）
+或直接下载安装包：[Zhiku-Setup-0.5.4.exe](https://github.com/Thams94/ai-group-chat/releases/download/v0.5.4/Zhiku-Setup-0.5.4.exe)（102 MB，Windows）
 
 ### 配置
 
