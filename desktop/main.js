@@ -1500,6 +1500,11 @@ ipcMain.handle('win:refocus', () => {
   return { ok: after, before, after };
 });
 
+ipcMain.handle('diag:note', (_e, obj) => {
+  try { appendDiag(obj); } catch { /* 忽略 */ }
+  return { ok: true };
+});
+
 ipcMain.handle('diag:dump', (_e, info) => {
   const file = path.join(USER_DIR, 'diagnostics.log');
   try {

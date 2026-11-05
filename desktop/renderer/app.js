@@ -1225,6 +1225,28 @@ function pushSystem(text) {
   persistChat();
 }
 
+/** 带动作按钮的系统消息（用于自动暂停后的「继续审核」） */
+function pushActionPrompt(text, label) {
+  // 如果最后一条已经是带按钮的提示，直接更新它，避免重复堆叠
+  const last = state.messages[state.messages.length - 1];
+  if (last && last.role === 'system' && last.action) {
+    last.text = text;
+    last.action = { label };
+    renderMessages();
+    persistChat();
+    return;
+  }
+  const m = { id: uid(), role: 'system', text, action: { label }, ts: Date.now() };
+  state.messages.push(m);
+  if (state.messages.length === 1) {
+    renderMessages();
+  } else {
+    $('#messages').appendChild(messageNode(m));
+    $('#messages').scrollTop = $('#messages').scrollHeight;
+  }
+  persistChat();
+}
+
 function pickModerator(enabled) {
   if (state.settings.moderatorId) {
     const m = state.members.find((x) => x.id === state.settings.moderatorId);
@@ -1236,6 +1258,7 @@ function pickModerator(enabled) {
 async function askModerator(moderator, instruction, names) {
   const provider = providerOf(moderator);
   const msgs = buildMessages(moderator, instruction);
+  let firstRaw = '';
 
   // 优先走非流式 JSON 模式：结构化决定比自由文本可靠得多
   if (provider && typeof bridge.decideModerator === 'function') {
@@ -1247,13 +1270,15 @@ async function askModerator(moderator, instruction, names) {
         json: true,
         maxTokens: 1500,
       });
+      if (res && res.text) firstRaw = res.text;
       if (res && res.ok && res.text) {
         const p = parsePlan(res.text, names);
-        if (p.valid) return p;
+        if (p.valid) return Object.assign(p, { raw: res.text });
       }
     } catch { /* 回退到流式 */ }
   }
-  return parsePlan(await runSilent(moderator, instruction), names);
+  const raw = await runSilent(moderator, instruction);
+  return Object.assign(parsePlan(raw, names), { raw: raw || firstRaw || '' });
 }
 
 function resolveSpeaker(name, pool) {
@@ -1270,10 +1295,10 @@ async function runModerated(rounds, enabled) {
     return { finished: false, conclusion: '' };
   }
 
-  // 主持人只负责组织，不参与发言
-  const pool = enabled.filter((m) => m.id !== moderator.id);
+  // 主持人也是成员，默认参与发言；这里只保证至少有一个可发言的人
+  const pool = enabled.slice();
   if (!pool.length) {
-    pushSystem('除了主持人之外没有可发言的成员，请先添加审核成员。');
+    pushSystem('没有可发言的成员，请先添加审核成员。');
     return { finished: false, conclusion: '' };
   }
 
@@ -1296,6 +1321,7 @@ async function runModerated(rounds, enabled) {
   let invalidStreak = 0;
   let lastSpeakerId = null;
   let sameStreak = 0;
+  let lastRaw = '';
 
   while (!state.stopRequested && (unlimited || i < rounds) && i < cap) {
     const instruction = [
@@ -1326,8 +1352,18 @@ async function runModerated(rounds, enabled) {
 
     if (!plan.valid) {
       invalidStreak++;
+      lastRaw = plan.raw || lastRaw;
+      if (typeof bridge.diagNote === 'function') {
+        try { bridge.diagNote({ kind: 'moderator_invalid', model: moderator.model, raw: String(plan.raw || '').slice(0, 1200) }); } catch { /* 忽略 */ }
+      }
       if (invalidStreak >= 3) {
-        pushSystem('主持人连续 3 次没有给出可解析的决定，已暂停本议题。可以点「继续」重试，或在议题卡里点「标记完成」。');
+        const snippet = String(lastRaw || '').replace(/\s+/g, ' ').slice(0, 200);
+        pushActionPrompt(
+          '主持人连续 3 次没有给出可解析的决定，已暂停本议题。'
+          + (snippet ? `\n\n主持人最后一次回复（节选）：${snippet}` : '')
+          + '\n\n点下面的「继续审核」重试，或在议题卡里点「标记完成」。',
+          '继续审核'
+        );
         break;
       }
     } else {
@@ -1367,24 +1403,65 @@ async function runModerated(rounds, enabled) {
   return { finished, conclusion };
 }
 
-function parsePlan(text, names) {
-  try {
-    const m = String(text).match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('no json');
-    const obj = JSON.parse(m[0]);
-    const next = String(obj.next || obj.name || '');
-    // 主持人可以用 done:true 或 next:"结束" 来收尾
-    const done = obj.done === true || /^(结束|停止|收尾|end|stop|finish)$/i.test(next);
-    return {
-      done, next,
-      prompt: obj.prompt || obj.question || '',
-      conclusion: obj.conclusion || obj.summary || '',
-      valid: true,
-    };
-  } catch {
-    // 解析失败不要把 names[0] 当发言人（可能就是主持人自己）
-    return { done: false, next: '', prompt: '', conclusion: '', valid: false };
+/** 提取文本里所有平衡的 JSON 对象（模型常在 JSON 前后夹带解释） */
+function extractJsonCandidates(text) {
+  const s = String(text || '');
+  const out = [s.trim()];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '{') continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let j = i; j < s.length; j++) {
+      const ch = s[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+      } else if (ch === '"') {
+        inStr = true;
+      } else if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0) { out.push(s.slice(i, j + 1)); i = j; break; }
+      }
+    }
   }
+  return out;
+}
+
+function parsePlan(text, names) {
+  const raw = String(text || '');
+
+  for (const cand of extractJsonCandidates(raw)) {
+    if (!cand) continue;
+    try {
+      const obj = JSON.parse(cand);
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) continue;
+      const next = String(obj.next || obj.name || obj.speaker || obj.member || '').trim();
+      const done = obj.done === true
+        || /^(结束|停止|收尾|完成|end|stop|finish|done)$/i.test(next);
+      return {
+        done,
+        next,
+        prompt: String(obj.prompt || obj.question || obj.instruction || ''),
+        conclusion: String(obj.conclusion || obj.summary || obj.result || ''),
+        valid: true,
+      };
+    } catch { /* 试下一个候选 */ }
+  }
+
+  // 纯文本兜底：整段就是一个成员名
+  const plain = raw.trim().replace(/^["'“”「」]|["'“”「」]$/g, '').trim();
+  if (plain && Array.isArray(names) && names.includes(plain)) {
+    return { done: false, next: plain, prompt: '', conclusion: '', valid: true };
+  }
+  if (/^(结束|完成|收尾|done|finish|stop|end)$/i.test(plain)) {
+    return { done: true, next: '', prompt: '', conclusion: '', valid: true };
+  }
+
+  return { done: false, next: '', prompt: '', conclusion: '', valid: false };
 }
 
 async function runSilent(member, extra) {
@@ -1808,7 +1885,13 @@ async function runIssueQueue(enabled, rounds) {
       state.currentIssueId = issue.id;
       renderIssues();
       persistChat();
-      pushSystem(`议题「${issue.title}」尚未完成（主持人未宣布结束）。点「继续」接着审，或在议题卡里点「标记完成」。`);
+      const lastMsg = state.messages[state.messages.length - 1];
+      if (!(lastMsg && lastMsg.role === 'system' && lastMsg.action)) {
+        pushActionPrompt(
+          `议题「${issue.title}」尚未完成（主持人未宣布结束）。点「继续审核」接着审，或在议题卡里点「标记完成」。`,
+          '继续审核'
+        );
+      }
       break;
     }
   }

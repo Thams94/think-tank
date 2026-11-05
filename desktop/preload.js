@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // 诊断
   diagDump: (info) => ipcRenderer.invoke('diag:dump', info),
+  diagNote: (obj) => ipcRenderer.invoke('diag:note', obj),
 
   // 强制激活窗口（修复原生对话框后失焦）
   refocus: () => ipcRenderer.invoke('win:refocus'),

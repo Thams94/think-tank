@@ -1049,6 +1049,7 @@
     webSearch,
     exportMarkdown,
     diagDump, refocus,
+    diagNote: async () => ({ ok: false }),
     listSessions, createSession, loadSession, saveSession, renameSession, deleteSession,
     loadChat: async () => ({ messages: [] }),
     saveChat: async () => ({ ok: true }),

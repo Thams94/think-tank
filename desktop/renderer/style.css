@@ -310,8 +310,7 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 
 .app.sessions-collapsed .sessions { padding: 12px 6px; }
 .app.sessions-collapsed .brand-text,
-.app.sessions-collapsed .sessions .section-title,
-.app.sessions-collapsed .sidebar-foot { display: none; }
+.app.sessions-collapsed .sessions .section-title { display: none; }
 .app.sessions-collapsed .brand.small { justify-content: center; }
 
 .app.sessions-collapsed .session {
@@ -337,8 +336,7 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .app.members-collapsed { grid-template-columns: 200px 64px 1fr 260px; }
 .app.members-collapsed .sidebar { padding: 12px 6px; }
 .app.members-collapsed .members-head .head-label,
-.app.members-collapsed .members-head .mini,
-.app.members-collapsed .sidebar-foot { display: none; }
+.app.members-collapsed .members-head .mini { display: none; }
 .app.members-collapsed .members-head { justify-content: center; }
 .app.members-collapsed .member { justify-content: center; padding: 6px 0; }
 .app.members-collapsed .member .meta { display: none; }
@@ -585,4 +583,14 @@ pre.raw { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: 
   padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px;
 }
 .batch-row .inline { display: flex; align-items: center; gap: 6px; }
+
+/* ---------- 收起侧栏时底部按钮只留图标 ---------- */
+.app.sessions-collapsed .sidebar-foot .txt,
+.app.members-collapsed .sidebar-foot .txt { display: none; }
+.app.sessions-collapsed .sidebar-foot,
+.app.members-collapsed .sidebar-foot { justify-content: center; }
+.app.sessions-collapsed .sidebar-foot button,
+.app.members-collapsed .sidebar-foot button {
+  padding: 8px 0; font-size: 16px; line-height: 1; min-width: 0;
+}
 
