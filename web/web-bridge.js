@@ -830,45 +830,240 @@
     return { files: out, images: images.map((f) => ({ name: f.name })), used, docCount: docs.length };
   }
 
-  async function kbContext({ files, budget = 12000, wantImages = false, ocr = null, query = '' }) {
+  /* ---- 材料清单 + 按文件注入（与桌面版一致） ---- */
+
+  function fileOutline(name, text) {
+    const ext = ('.' + String(name).split('.').pop()).toLowerCase();
+    const lines = String(text).split('\n');
+    const hits = [];
+    const MAX = 80;
+    const add = (i, l) => { if (hits.length < MAX) hits.push(`${i + 1}: ${l.trim().slice(0, 110)}`); };
+
+    const norm = ext === '.jsx' || ext === '.mjs' || ext === '.cjs' ? '.js'
+      : ext === '.tsx' ? '.ts' : ext === '.htm' ? '.html' : ext;
+
+    const rules = {
+      '.py': [/^\s*(async\s+def|def|class)\s+\w+/],
+      '.js': [
+        /^\s*(export\s+(default\s+)?)?(async\s+)?(function|class)\s+\w+/,
+        /^\s*(app|router|server)\.(get|post|put|delete|use|all)\(/,
+        /^\s*(const|let|var)\s+\w+\s*=\s*(async\s*)?\(/,
+      ],
+      '.ts': [
+        /^\s*(export\s+)?(async\s+)?(function|class|interface|type)\s+\w+/,
+        /^\s*(app|router)\.(get|post|put|delete|use)\(/,
+      ],
+      '.html': [/<section\b/, /<script\b/, /<\/script>/, /<form\b/, /<main\b/, /id="[A-Za-z][\w-]*"/],
+      '.css': [/^\s*[.#][\w-]+[^{]*\{/],
+      '.md': [/^#{1,4}\s+\S/],
+      '.json': [/^ {0,4}"[^"]+"\s*:/],
+      '.yml': [/^[\w-]+\s*:/],
+      '.yaml': [/^[\w-]+\s*:/],
+    };
+
+    const list = rules[norm] || [];
+    if (list.length) {
+      lines.forEach((l, i) => { if (list.some((re) => re.test(l))) add(i, l); });
+      return hits;
+    }
+    lines.forEach((l, i) => {
+      const t = l.trim();
+      if (t && t.length <= 60 && /^(第[一二三四五六七八九十百]+[章节条]|[一二三四五六七八九十]+、|\(?\d+[.、)]|[A-Z][A-Za-z ]{2,30}:?$)/.test(t)) add(i, t);
+    });
+    return hits;
+  }
+
+  function sampleWindows(totalLines, headLines, tailLines, budgetChars) {
+    const win = 40;
+    const start = headLines;
+    const end = totalLines - tailLines;
+    const span = end - start;
+    if (span <= win * 2) return [];
+    const count = Math.max(2, Math.min(8, Math.floor(budgetChars / (win * 45))));
+    const out = [];
+    for (let k = 1; k <= count; k++) {
+      const center = start + Math.floor(span * (k / (count + 1)));
+      const from = Math.max(start, center - Math.floor(win / 2));
+      const to = Math.min(end, from + win);
+      if (to - from >= 10) out.push([from, to]);
+    }
+    return out;
+  }
+
+  function renderKbFile(entry, text, allowance) {
+    const lines = String(text).split('\n');
+    const totalLines = lines.length;
+    const totalChars = text.length;
+    const header = `【${entry.name}】${totalLines} 行 / ${totalChars} 字`;
+
+    if (totalChars <= allowance) {
+      return { block: `${header}\n${text}`, full: true, injected: totalLines, totalLines };
+    }
+
+    const outline = fileOutline(entry.name, text);
+    const headBudget = Math.max(600, Math.floor(allowance * 0.55));
+    const tailBudget = Math.max(0, Math.floor(allowance * 0.18));
+
+    const headLines = [];
+    let hLen = 0;
+    for (let i = 0; i < totalLines && hLen < headBudget; i++) {
+      headLines.push(lines[i]);
+      hLen += lines[i].length + 1;
+    }
+    const tailLines = [];
+    let tLen = 0;
+    for (let j = totalLines - 1; j >= headLines.length && tLen < tailBudget; j--) {
+      tailLines.unshift(lines[j]);
+      tLen += lines[j].length + 1;
+    }
+
+    const parts = [header];
+    if (outline.length) parts.push('[结构大纲]\n' + outline.map((x) => '  ' + x).join('\n'));
+    parts.push(`[第 1–${headLines.length} 行]\n${headLines.join('\n').trimEnd()}`);
+
+    const sampleBudget = Math.min(Math.floor(allowance * 0.3), 12000);
+    const windows = sampleWindows(totalLines, headLines.length, tailLines.length, sampleBudget);
+    let sampledLines = 0;
+    for (const [from, to] of windows) {
+      const slice = lines.slice(from, to);
+      parts.push(`[采样 第 ${from + 1}–${to} 行]\n${slice.join('\n').trimEnd()}`);
+      sampledLines += slice.length;
+    }
+
+    if (tailLines.length) {
+      const from = totalLines - tailLines.length + 1;
+      parts.push(`[第 ${from}–${totalLines} 行]\n${tailLines.join('\n')}`);
+    }
+    const startTail = totalLines - tailLines.length + 1;
+    const injected = headLines.length + tailLines.length + sampledLines;
+    const missing = Math.max(totalLines - injected, 0);
+    parts.push(
+      `⚠ 共 ${totalLines} 行；此处注入了第 1–${headLines.length} 行、结构大纲、${windows.length} 段中段采样` +
+      (tailLines.length ? `和第 ${startTail}–${totalLines} 行` : '') +
+      `，合计约 ${injected} 行，其余 ${missing} 行未注入。**未注入不等于不存在**。`
+    );
+    return { block: parts.join('\n'), full: false, injected, totalLines };
+  }
+
+  function buildKbBlocks(items, budget, focus) {
+    const inventory = items.map((it) => ({
+      name: it.entry.name,
+      lines: it.text.split('\n').length,
+      chars: it.text.length,
+    }));
+
+    const alloc = new Map();
+    let primary = items;
+    let secondary = [];
+
+    const terms = queryTerms(focus || '');
+    if (terms.length && items.length > 1) {
+      const lowers = items.map((it) => it.text.toLowerCase());
+      const tt2 = terms.map((t) => String(t).toLowerCase()).filter(Boolean);
+      const df = new Map();
+      for (const t of tt2) {
+        let n = 0;
+        for (const txt of lowers) if (txt.includes(t)) n++;
+        df.set(t, n);
+      }
+      const N = items.length;
+      const scored = items.map((it) => {
+        const lower = it.text.toLowerCase();
+        let hits = 0;
+        for (const tt of tt2) {
+          const d = df.get(tt) || 0;
+          if (d === 0 || d === N) continue;
+          const w = Math.log(N / d) + 1;
+          let idx = 0;
+          let c = 0;
+          while (c < 40) {
+            const pos = lower.indexOf(tt, idx);
+            if (pos < 0) break;
+            c++;
+            idx = pos + tt.length;
+          }
+          hits += c * w;
+        }
+        return { it, hits, density: hits / Math.log2(it.text.length + 2) };
+      });
+      const hot = scored.filter((x) => x.hits > 0 && x.density > 0).sort((a, b) => b.density - a.density).slice(0, 2);
+      if (hot.length) {
+        const hotPaths = new Set(hot.map((x) => x.it.entry.path));
+        primary = items.filter((it) => hotPaths.has(it.entry.path));
+        secondary = items.filter((it) => !hotPaths.has(it.entry.path));
+      }
+    }
+
+    const primaryBudget = secondary.length ? Math.floor(budget * 0.78) : budget;
+    const secondaryBudget = budget - primaryBudget;
+    let pool = primaryBudget;
+
+    const sorted = primary.slice().sort((a, b) => a.text.length - b.text.length);
+    const pending = [];
+    for (const it of sorted) {
+      const cap = Math.max(8000, Math.floor(pool * 0.45));
+      if (it.text.length <= cap && it.text.length <= pool) {
+        alloc.set(it.entry.path, it.text.length);
+        pool -= it.text.length;
+      } else {
+        pending.push(it);
+      }
+    }
+    if (pending.length) {
+      const weights = pending.map((it) => Math.sqrt(it.text.length));
+      const wsum = weights.reduce((a, b) => a + b, 0) || 1;
+      const left = Math.max(pool, 0);
+      const minEach = Math.min(1500, Math.floor(Math.max(left, 1) * 0.3 / pending.length) || 800);
+      pending.forEach((it, i) => {
+        let share = Math.floor(left * (weights[i] / wsum));
+        if (share < minEach) share = Math.min(minEach, it.text.length);
+        alloc.set(it.entry.path, Math.min(share, it.text.length));
+      });
+    }
+    if (secondary.length) {
+      const each = Math.max(600, Math.floor(secondaryBudget / secondary.length));
+      for (const it of secondary) alloc.set(it.entry.path, Math.min(each, it.text.length));
+    }
+
+    const blocks = [];
+    const truncated = [];
+    let used = 0;
+    for (const it of items) {
+      const allowance = alloc.get(it.entry.path) || 800;
+      const r = renderKbFile(it.entry, it.text, allowance);
+      blocks.push(r.block);
+      used += r.block.length;
+      if (!r.full) truncated.push({ name: it.entry.name, injected: r.injected, total: r.totalLines });
+    }
+
+    return {
+      text: blocks.join('\n\n'),
+      used,
+      inventory,
+      truncated,
+      focused: primary.map((it) => it.entry.name),
+      totalChars: items.reduce((a, b) => a + b.text.length, 0),
+    };
+  }
+
+  async function kbContext({ files, budget = 12000, wantImages = false, ocr = null, query = '', focus = '' }) {
     const docs = (files || []).filter((f) => f.kind !== 'image');
     const images = (files || []).filter((f) => f.kind === 'image');
     const parts = [];
     let used = 0;
     let skipped = 0;
 
-    // 关键词检索：挑最相关的片段
-    const terms = queryTerms(query);
-    const scored = [];
+    // 材料清单 + 按文件保证注入
+    const items = [];
     for (const f of docs) {
       const text = String((await idbGet('kbcache', f.path)) || '')
-        .replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+        .replace(/\r\n/g, '\n').trim();
       if (!text) { skipped++; continue; }
-      splitChunks(text).forEach((chunk, idx) => {
-        scored.push({ file: f.name, idx, chunk, score: scoreChunk(chunk, terms) });
-      });
+      items.push({ entry: f, text });
     }
-
-    const totalChunks = scored.length;
-    let picked = terms.length
-      ? scored.filter((x) => x.score > 0).sort((a, b) => b.score - a.score)
-      : scored.slice(0, 12);
-    if (terms.length && !picked.length) picked = scored.slice(0, 12);
-
-    let matched = 0;
-    for (const item of picked) {
-      const block = `【${item.file}】\n${item.chunk.trim()}`;
-      if (used + block.length > budget) {
-        const remain = budget - used;
-        if (remain < 200) break;
-        parts.push(block.slice(0, remain));
-        used += remain;
-        break;
-      }
-      parts.push(block);
-      used += block.length;
-      if (item.score > 0) matched++;
-    }
+    const picked = buildKbBlocks(items, budget, focus || query);
+    parts.push(picked.text);
+    used += picked.used;
 
     const imagePayload = [];
     if (wantImages) {
@@ -912,6 +1107,10 @@
       text: parts.join('\n\n'),
       used,
       skipped,
+      inventory: picked.inventory || [],
+      truncated: picked.truncated || [],
+      focused: picked.focused || [],
+      totalChars: picked.totalChars || 0,
       docCount: docs.length,
       imageCount: images.length,
       images: imagePayload,

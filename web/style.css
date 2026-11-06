@@ -637,3 +637,40 @@ button:disabled, input:disabled, select:disabled { opacity: .45; cursor: not-all
   }
 }
 
+/* ---------- 议题卡判定徽章 ---------- */
+.issue .verdict {
+  flex: none; font-size: 11px; padding: 1px 6px; border-radius: 6px;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.issue .verdict.v-fail { color: #ff8a8a; background: rgba(224, 108, 91, .16); border-color: rgba(224, 108, 91, .45); }
+.issue .verdict.v-pass { color: #6ee7b7; background: rgba(70, 194, 163, .14); border-color: rgba(70, 194, 163, .42); }
+.issue .verdict.v-risk { color: #f5c542; background: rgba(245, 166, 35, .16); border-color: rgba(245, 166, 35, .45); }
+.issue .verdict.v-test { color: #9dbcff; background: rgba(91, 141, 239, .16); border-color: rgba(91, 141, 239, .45); }
+
+/* ---------- @ 点名自动补全 ---------- */
+.composer { position: relative; }
+.mention-menu {
+  position: absolute; left: 14px; right: 14px; bottom: calc(100% - 6px);
+  max-height: 260px; overflow-y: auto; z-index: 40;
+  background: var(--panel, #161a24); border: 1px solid var(--line, #2a3040);
+  border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.mention-head {
+  font-size: 11px; color: var(--muted, #8b93a7);
+  padding: 4px 8px 6px; border-bottom: 1px solid var(--line, #2a3040); margin-bottom: 4px;
+}
+.mention-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+.mention-item.active, .mention-item:hover { background: rgba(91, 141, 239, .18); }
+.mention-name { flex: none; color: var(--text, #e6e9f0); }
+.mention-model {
+  margin-left: auto; font-size: 11px; color: var(--muted, #8b93a7);
+  max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 议题卡头部：状态与判定一行，标题独占一行，避免窄栏里挤成竖排 */
+.issue .issue-head { flex-wrap: wrap; row-gap: 4px; }
+.issue .issue-head .name { flex: 1 1 100%; order: 5; white-space: normal; }

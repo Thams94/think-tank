@@ -1148,7 +1148,260 @@ ipcMain.handle('kb:index', async (_e, paths) => {
  * budget: 允许注入的最大字符数（约等于 tokens * 1.5 的中文比例，粗算即可）
  * wantImages: 成员是否支持看图（支持则返回图片，交给模型直接看）
  */
-ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false, query = '' }) => {
+/** 结构大纲：抽函数/类/路由/标题等骨架，让模型即使看不到全文也知道里面有什么 */
+function fileOutline(name, text) {
+  const ext = path.extname(name).toLowerCase();
+  const lines = String(text).split('\n');
+  const hits = [];
+  const MAX = 80;
+  const add = (i, l) => { if (hits.length < MAX) hits.push(`${i + 1}: ${l.trim().slice(0, 110)}`); };
+
+  const norm = ext === '.jsx' || ext === '.mjs' || ext === '.cjs' ? '.js'
+    : ext === '.tsx' ? '.ts'
+    : ext === '.htm' ? '.html' : ext;
+
+  const rules = {
+    '.py': [/^\s*(async\s+def|def|class)\s+\w+/],
+    '.js': [
+      /^\s*(export\s+(default\s+)?)?(async\s+)?(function|class)\s+\w+/,
+      /^\s*(app|router|server)\.(get|post|put|delete|use|all)\(/,
+      /^\s*(const|let|var)\s+\w+\s*=\s*(async\s*)?\(/,
+    ],
+    '.ts': [
+      /^\s*(export\s+)?(async\s+)?(function|class|interface|type)\s+\w+/,
+      /^\s*(app|router)\.(get|post|put|delete|use)\(/,
+    ],
+    '.html': [/<section\b/, /<script\b/, /<\/script>/, /<form\b/, /<main\b/, /id="[A-Za-z][\w-]*"/],
+    '.css': [/^\s*[.#][\w-]+[^{]*\{/],
+    '.md': [/^#{1,4}\s+\S/],
+    '.json': [/^ {0,4}"[^"]+"\s*:/],
+    '.yml': [/^[\w-]+\s*:/],
+    '.yaml': [/^[\w-]+\s*:/],
+  };
+
+  const list = rules[norm] || [];
+  if (list.length) {
+    lines.forEach((l, i) => { if (list.some((re) => re.test(l))) add(i, l); });
+    return hits;
+  }
+
+  // 通用：像标题/条款的短行
+  lines.forEach((l, i) => {
+    const t = l.trim();
+    if (t && t.length <= 60 && /^(第[一二三四五六七八九十百]+[章节条]|[一二三四五六七八九十]+、|\(?\d+[.、)]|[A-Z][A-Za-z ]{2,30}:?$)/.test(t)) add(i, t);
+  });
+  return hits;
+}
+
+/** 在文件中部均匀取若干窗口，弥补"只读头尾"的盲区 */
+function sampleWindows(totalLines, headLines, tailLines, budgetChars) {
+  const win = 40;
+  const start = headLines;
+  const end = totalLines - tailLines;
+  const span = end - start;
+  if (span <= win * 2) return [];
+  const count = Math.max(2, Math.min(8, Math.floor(budgetChars / (win * 45))));
+  const out = [];
+  for (let k = 1; k <= count; k++) {
+    const center = start + Math.floor(span * (k / (count + 1)));
+    const from = Math.max(start, center - Math.floor(win / 2));
+    const to = Math.min(end, from + win);
+    if (to - from >= 10) out.push([from, to]);
+  }
+  return out;
+}
+
+/** 单文件渲染：完整 / 大纲 + 头 + 中段采样 + 尾（并标注缺了哪些行） */
+function renderKbFile(entry, text, allowance) {
+  const lines = String(text).split('\n');
+  const totalLines = lines.length;
+  const totalChars = text.length;
+  const header = `【${entry.name}】${totalLines} 行 / ${totalChars} 字`;
+
+  if (totalChars <= allowance) {
+    return { block: `${header}\n${text}`, full: true, injected: totalLines, totalLines };
+  }
+
+  const outline = fileOutline(entry.name, text);
+  const headBudget = Math.max(600, Math.floor(allowance * 0.55));
+  const tailBudget = Math.max(0, Math.floor(allowance * 0.18));
+
+  const headLines = [];
+  let hLen = 0;
+  for (let i = 0; i < totalLines && hLen < headBudget; i++) {
+    headLines.push(lines[i]);
+    hLen += lines[i].length + 1;
+  }
+
+  const tailLines = [];
+  let tLen = 0;
+  for (let j = totalLines - 1; j >= headLines.length && tLen < tailBudget; j--) {
+    tailLines.unshift(lines[j]);
+    tLen += lines[j].length + 1;
+  }
+
+  const parts = [header];
+  if (outline.length) parts.push('[结构大纲]\n' + outline.map((x) => '  ' + x).join('\n'));
+  parts.push(`[第 1–${headLines.length} 行]\n${headLines.join('\n').trimEnd()}`);
+
+  // 中段均匀采样：让模型能看到文件中间的实际内容，而不是只能凭大纲猜
+  const sampleBudget = Math.min(Math.floor(allowance * 0.3), 12000);
+  const windows = sampleWindows(totalLines, headLines.length, tailLines.length, sampleBudget);
+  let sampledLines = 0;
+  for (const [from, to] of windows) {
+    const slice = lines.slice(from, to);
+    parts.push(`[采样 第 ${from + 1}–${to} 行]\n${slice.join('\n').trimEnd()}`);
+    sampledLines += slice.length;
+  }
+
+  if (tailLines.length) {
+    const from = totalLines - tailLines.length + 1;
+    parts.push(`[第 ${from}–${totalLines} 行]\n${tailLines.join('\n')}`);
+  }
+  const startTail = totalLines - tailLines.length + 1;
+  const injected = headLines.length + tailLines.length + sampledLines;
+  const missing = Math.max(totalLines - injected, 0);
+  parts.push(
+    `⚠ 共 ${totalLines} 行；此处注入了第 1–${headLines.length} 行、结构大纲、` +
+    `${windows.length} 段中段采样` +
+    (tailLines.length ? `和第 ${startTail}–${totalLines} 行` : '') +
+    `，合计约 ${injected} 行，其余 ${missing} 行未注入。**未注入不等于不存在**；` +
+    `引用结论时必须区分"看到了"和"没看到"，没看到的只能标待核实，不能当成不存在。`
+  );
+  return { block: parts.join('\n'), full: false, injected, totalLines };
+}
+
+/** 审核友好的上下文：保证每个文件都有内容，并返回材料清单 */
+async function buildKbBlocks(docs, budget, focus) {
+  const items = [];
+  let skipped = 0;
+
+  for (const f of docs) {
+    try {
+      const text = String(await kbEnsureCache(f)).replace(/\r\n/g, '\n');
+      if (!text.trim()) { skipped++; continue; }
+      items.push({ entry: f, text });
+    } catch {
+      skipped++;
+    }
+  }
+
+  const inventory = items.map((it) => ({
+    name: it.entry.name,
+    lines: it.text.split('\n').length,
+    chars: it.text.length,
+  }));
+
+  const alloc = new Map();
+
+  // ---- 按议题挑相关文件：命中议题关键词的文件给足预算，其余只给大纲+头部 ----
+  const terms = queryTerms(focus || '');
+  let primary = items;
+  let secondary = [];
+
+  if (terms.length && items.length > 1) {
+    // 用 IDF 压低"每个文件都有"的通用词，突出真正能区分文件的关键词
+    const lowers = items.map((it) => it.text.toLowerCase());
+    const tt2 = terms.map((t) => String(t).toLowerCase()).filter(Boolean);
+    const df = new Map();
+    for (const t of tt2) {
+      let n = 0;
+      for (const txt of lowers) if (txt.includes(t)) n++;
+      df.set(t, n);
+    }
+    const N = items.length;
+
+    const scored = items.map((it) => {
+      const lower = it.text.toLowerCase();
+      let hits = 0;
+      for (const tt of tt2) {
+        const d = df.get(tt) || 0;
+        if (d === 0 || d === N) continue;          // 谁都有 / 谁都没有的词不计分
+        const w = Math.log(N / d) + 1;
+        let idx = 0;
+        let c = 0;
+        while (c < 40) {
+          const pos = lower.indexOf(tt, idx);
+          if (pos < 0) break;
+          c++;
+          idx = pos + tt.length;
+        }
+        hits += c * w;
+      }
+      // 按长度对数归一化：避免超大文件凭命中数压倒一切
+      const density = hits / Math.log2(it.text.length + 2);
+      return { it, hits, density };
+    });
+    const hot = scored.filter((x) => x.hits > 0 && x.density > 0).sort((a, b) => b.density - a.density).slice(0, 2);
+    if (hot.length) {
+      const hotPaths = new Set(hot.map((x) => x.it.entry.path));
+      primary = items.filter((it) => hotPaths.has(it.entry.path));
+      secondary = items.filter((it) => !hotPaths.has(it.entry.path));
+    }
+  }
+
+  const primaryBudget = secondary.length ? Math.floor(budget * 0.78) : budget;
+  const secondaryBudget = budget - primaryBudget;
+  let pool = primaryBudget;
+
+  // 1) 相关文件：小的整份注入
+  const sorted = primary.slice().sort((a, b) => a.text.length - b.text.length);
+  const pending = [];
+  for (const it of sorted) {
+    const cap = Math.max(8000, Math.floor(pool * 0.45));
+    if (it.text.length <= cap && it.text.length <= pool) {
+      alloc.set(it.entry.path, it.text.length);
+      pool -= it.text.length;
+    } else {
+      pending.push(it);
+    }
+  }
+
+  // 2) 其余相关文件按 sqrt(大小) 分剩余预算，保证每份至少有内容
+  if (pending.length) {
+    const weights = pending.map((it) => Math.sqrt(it.text.length));
+    const wsum = weights.reduce((a, b) => a + b, 0) || 1;
+    const left = Math.max(pool, 0);
+    const minEach = Math.min(1500, Math.floor(Math.max(left, 1) * 0.3 / pending.length) || 800);
+    pending.forEach((it, i) => {
+      let share = Math.floor(left * (weights[i] / wsum));
+      if (share < minEach) share = Math.min(minEach, it.text.length);
+      const hard = Math.max(800, it.text.length);
+      alloc.set(it.entry.path, Math.min(Math.min(share, hard), it.text.length));
+    });
+  }
+
+  // 3) 次要文件：只给大纲 + 头部，够判断"里面有没有相关东西"即可
+  if (secondary.length) {
+    const each = Math.max(600, Math.floor(secondaryBudget / secondary.length));
+    for (const it of secondary) {
+      alloc.set(it.entry.path, Math.min(each, it.text.length));
+    }
+  }
+
+  const blocks = [];
+  const truncated = [];
+  let used = 0;
+  for (const it of items) {
+    const allowance = alloc.get(it.entry.path) || 800;
+    const r = renderKbFile(it.entry, it.text, allowance);
+    blocks.push(r.block);
+    used += r.block.length;
+    if (!r.full) truncated.push({ name: it.entry.name, injected: r.injected, total: r.totalLines });
+  }
+
+  return {
+    text: blocks.join('\n\n'),
+    used,
+    skipped,
+    inventory,
+    truncated,
+    focused: primary.map((it) => it.entry.name),
+    totalChars: items.reduce((a, b) => a + b.text.length, 0),
+  };
+}
+
+ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false, query = '', focus = '' }) => {
   const safeFiles = (files || []).filter((f) => isApprovedPath(f.path));
   const docs = safeFiles.filter((f) => f.kind !== 'image');
   const images = safeFiles.filter((f) => f.kind === 'image');
@@ -1157,9 +1410,9 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
   let used = 0;
   let skipped = 0;
 
-  // 按查询关键词检索最相关的片段
-  const picked = await pickKbChunks(docs, query, budget);
-  parts.push(...picked.parts);
+  // 材料清单 + 按文件保证注入（审核场景必须看到每个文件，而不是被大文件吃光预算）
+  const picked = await buildKbBlocks(docs, budget, focus || query);
+  parts.push(picked.text);
   used += picked.used;
   skipped += picked.skipped;
 
@@ -1198,9 +1451,11 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
   return {
     text: parts.join('\n\n'),
     used,
-    chunksTotal: picked.total || 0,
-    chunksMatched: picked.matched || 0,
-    filesUsed: picked.filesUsed || 0,
+    inventory: picked.inventory || [],
+    truncated: picked.truncated || [],
+    focused: picked.focused || [],
+    totalChars: picked.totalChars || 0,
+    filesUsed: (picked.inventory || []).length,
     skipped,
     docCount: docs.length,
     imageCount: images.length,
@@ -1328,7 +1583,15 @@ ipcMain.handle('sessions:load', (_e, id) => {
   return file;
 });
 
-ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt, issues }) => {
+const sessionSaveSeq = new Map();   // 每个会话最后写入的保存序号，用来丢弃过期保存
+
+ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt, issues, seq }) => {
+  // 序号更旧的保存直接丢弃：避免排队中的旧快照覆盖刚写入的新数据
+  if (typeof seq === 'number') {
+    const last = sessionSaveSeq.get(id) || 0;
+    if (seq < last) return { ok: true, skipped: true, reason: 'stale-save' };
+    sessionSaveSeq.set(id, seq);
+  }
   const idx = loadSessionIndex();
   const existing = readJson(sessionPath(id), { id, title: '新会话', messages: [] });
   const data = {

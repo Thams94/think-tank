@@ -1,4 +1,6 @@
-# Think Tank · Multi-Model Discussion
+# Think Tank · Multi-model Review Workbench · Multi-Model Discussion
+
+![Main UI](docs/screenshots/01-主界面.png)
 
 Put **several LLMs into one conversation** so they can discuss, debate, and cross-check each other — instead of asking one model at a time.
 

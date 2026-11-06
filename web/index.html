@@ -75,12 +75,8 @@
       <footer class="composer">
         <textarea id="input" rows="3"
           placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea>
-        <div class="at-hint">
-          <span><code>@名字</code> 公开点名</span>
-          <span class="priv"><code>@@名字</code> 私密点名（只有你与被点名者可见）</span>
-        </div>
+        <div id="mentionMenu" class="mention-menu" hidden></div>
         <div class="composer-actions">
-          <div class="quick" id="quickAt"></div>
           <button class="ghost kb-open-btn" id="btnKb" title="打开知识库">📚 知识库</button>
           <button class="ghost" id="btnResumeIssue" hidden>继续审核</button>
           <button class="ghost" id="btnPause" hidden>暂停</button>
@@ -248,7 +244,7 @@
         <button class="ghost danger" id="btnClearKb">清空全部</button>
       </div>
       <label>注入上限（字符）
-        <input id="kbBudget" type="number" step="1000" min="1000" value="12000" />
+        <input id="kbBudget" type="number" step="1000" min="1000" max="800000" value="12000" />
       </label>
       <div class="row kb-cache-row">
         <span class="muted" id="kbCacheInfo">解析缓存：—</span>

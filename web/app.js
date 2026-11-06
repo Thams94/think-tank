@@ -176,6 +176,12 @@ function persistConfig() {
 }
 
 let saveTimer = null;
+let saveSeq = 0;
+
+function cancelPendingSave() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+}
+
 function persistChat() {
   clearTimeout(saveTimer);
   // 关键：在"安排保存"的时刻就锁定会话与内容，
@@ -508,23 +514,89 @@ function renderMembers() {
   }
 }
 
-function renderQuickAt() {
-  const box = $('#quickAt');
-  box.innerHTML = '';
-  for (const m of state.members) {
-    const pub = document.createElement('button');
-    pub.className = 'chip';
-    pub.textContent = '@' + m.name;
-    pub.onclick = () => insertAt('@' + m.name + ' ');
-    box.appendChild(pub);
+/* ---------------- @ 点名：输入框内自动补全 ---------------- */
 
-    const priv = document.createElement('button');
-    priv.className = 'chip priv';
-    priv.textContent = '@@' + m.name;
-    priv.title = '私密@：只有你和 TA 能看到';
-    priv.onclick = () => insertAt('@@' + m.name + ' ');
-    box.appendChild(priv);
-  }
+const mentionState = { open: false, items: [], index: 0, sigil: '@', start: 0 };
+
+function closeMention() {
+  const box = $('#mentionMenu');
+  if (box) { box.hidden = true; box.innerHTML = ''; }
+  mentionState.open = false;
+  mentionState.items = [];
+  mentionState.index = 0;
+}
+
+function currentMentionQuery() {
+  const input = $('#input');
+  if (!input) return null;
+  const caret = input.selectionStart;
+  if (caret !== input.selectionEnd) return null;
+  const before = input.value.slice(0, caret);
+  const m = before.match(/(^|[\s\n])(@{1,2})([^\s@\n]*)$/);
+  if (!m) return null;
+  return { sigil: m[2], query: m[3], start: caret - m[2].length - m[3].length };
+}
+
+function refreshMentionMenu() {
+  const box = $('#mentionMenu');
+  if (!box) return;
+  const ctx = currentMentionQuery();
+  if (!ctx) { closeMention(); return; }
+
+  const q = ctx.query.toLowerCase();
+  const list = state.members.filter((m) => !q || String(m.name).toLowerCase().includes(q));
+  if (!list.length) { closeMention(); return; }
+
+  mentionState.open = true;
+  mentionState.sigil = ctx.sigil;
+  mentionState.start = ctx.start;
+  mentionState.items = list;
+  if (mentionState.index >= list.length) mentionState.index = 0;
+
+  const priv = ctx.sigil === '@@';
+  box.innerHTML =
+    `<div class="mention-head">${priv ? '私密@（只有你与被点名者可见）' : '公开点名'}</div>` +
+    list.map((m, i) => `
+      <div class="mention-item${i === mentionState.index ? ' active' : ''}" data-i="${i}">
+        <span class="mention-name">${escapeHtml((priv ? '@@' : '@') + m.name)}</span>
+        <span class="mention-model">${escapeHtml(m.model || '')}</span>
+      </div>`).join('');
+  box.hidden = false;
+
+  box.querySelectorAll('.mention-item').forEach((el) => {
+    el.onmousedown = (e) => { e.preventDefault(); pickMention(Number(el.dataset.i)); };
+  });
+}
+
+function pickMention(i) {
+  const m = mentionState.items[i];
+  if (!m) return;
+  const input = $('#input');
+  const caret = input.selectionStart;
+  const insert = mentionState.sigil + m.name + ' ';
+  const v = input.value;
+  input.value = v.slice(0, mentionState.start) + insert + v.slice(caret);
+  const pos = mentionState.start + insert.length;
+  input.setSelectionRange(pos, pos);
+  closeMention();
+  input.focus();
+}
+
+function moveMention(delta) {
+  const n = mentionState.items.length;
+  if (!n) return;
+  mentionState.index = (mentionState.index + delta + n) % n;
+  const box = $('#mentionMenu');
+  box.querySelectorAll('.mention-item').forEach((el, i) => {
+    el.classList.toggle('active', i === mentionState.index);
+  });
+  const active = box.querySelector('.mention-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function renderQuickAt() {
+  if (mentionState.open) refreshMentionMenu();
+  else closeMention();
 }
 
 function insertAt(text) {
@@ -715,7 +787,7 @@ function visibleTo(msg, memberId) {
   return (msg.privateTo || []).includes(memberId);
 }
 
-function buildMessages(member, extra, kbText, searchText) {
+function buildMessages(member, extra, kbText, searchText, kbMeta) {
   const sysParts = [];
   if (state.groupPrompt) sysParts.push(state.groupPrompt);
   if (member.persona) sysParts.push(`【你的角色】${member.persona}`);
@@ -725,8 +797,42 @@ function buildMessages(member, extra, kbText, searchText) {
   }
   sysParts.push('你正在一个多模型群聊里。你能看到其他成员的公开发言；发言时直接给内容，不要复述别人，也不要假装自己是别人。');
   sysParts.push(`群成员：${state.members.map((m) => m.name).join('、')}。你的名字是「${member.name}」。`);
+  if (kbMeta && Array.isArray(kbMeta.inventory) && kbMeta.inventory.length) {
+    const lines = kbMeta.inventory.map((f) => {
+      const cut = (kbMeta.truncated || []).find((t) => t.name === f.name);
+      return `- ${f.name}（${f.lines} 行 / ${f.chars} 字${cut ? `，只注入 ${cut.injected}/${cut.total} 行` : '，完整注入'}）`;
+    });
+    sysParts.push(
+      `【材料清单】本次知识库共 ${kbMeta.inventory.length} 个文件：\n${lines.join('\n')}\n` +
+      '注意：上面列出的是**已经提供的全部材料**。下面注入的是这些文件的内容；' +
+      '某个文件若只注入了部分行，会标明行号范围。**未出现在注入内容里的部分，不代表文件不存在或没有提供**，' +
+      '请结合结构大纲判断，不要写「未提供源码」「未取得文件」这类结论。'
+    );
+  }
+
   if (kbText) {
-    sysParts.push('以下是用户提供的参考资料，回答时优先依据这些内容；资料没写的不要编造。\n\n' + kbText);
+    sysParts.push('以下是用户提供的材料内容（按文件分块，附结构大纲与行号范围）；据此判断，不要编造材料里没有的实现。\n\n' + kbText);
+  }
+
+  if ((state.issues || []).length) {
+    sysParts.push([
+      '【审核判定规则】（必须遵守）',
+      '1. 缺失即证据：只要能读到完整实现（或结构大纲已覆盖），其中没有某项校验/限制，这本身就是确定的缺陷结论，不要因为「没有运行验证」而降级为证据不足。',
+      '2. 每条结论必须归入以下三类之一，并写明类别：',
+      '   · 静态可判定 —— 代码/文档里能直接看到有或没有 → 直接判「不通过」或「通过」，给出文件名与行号；',
+      '   · 静态可推断 —— 逻辑链完整但依赖外部行为 → 判「高风险」，写清推断依据，并标注需实测确认；',
+      '   · 必须实测 —— 取决于浏览器/上游服务/时序 → 判「需实测」，给出最小验证步骤。',
+      '3. 一张议题卡里，绝大多数条目应落在前两类；只有真正依赖运行环境的少数条目才可归入「必须实测」。不允许整张卡都写「待验证」。',
+      '4. 引用证据写「文件名:行号」或原文片段；是推断就标「推断」。',
+      '5. 每张议题卡最终要给出一个判定：不通过 / 通过 / 高风险 / 需实测。',
+      '6. 判定强度必须与证据强度一致：如果结论里出现「待核对」「需确认」「可能」「无法确认」，就不能标「静态可判定」，必须降为「静态可推断（高风险）」或「需实测」。',
+      '7. 区分「安全缺陷」和「防御性编码建议」：如果某处输出虽然没有转义，但上游取值已被 Number()/Math.round()/白名单等锁死为数字或枚举，注入不可达，那就只能记为「防御性编码建议（低）」，不能算作不通过项。',
+      '8. 证据只能来自材料清单里的文件。引用某个文件的具体内容前，先确认它在清单里；清单里没有的文件，一律写「未提供」，不能当作证据，更不能凭空补全文件内容。',
+      '9. 被截断的文件只读到了部分行：对没注入的行，只能说「未读到」，不能推断其内容，也不能据此判定「不存在某项校验」。',
+      '10. 按攻击面排序，不平均用力：先列出「外部可触达的入口」（路由、请求头、上传、文件路径、模板渲染、URL 参数），按风险从高到低排：鉴权缺失 > 输入校验缺失 > 路径拼接 > 输出转义 > 日志/配置泄露。高风险区域逐行精读，低风险区域（纯样式、常量表、文案）只看结构。',
+      '11. 每条结论必须标注依据：写「依据：文件名:起行–止行」，或「依据：文件名 结构大纲」；没读到原文的写「依据：未读到」。用大纲冒充原文、或凭文件名猜内容，都算不合格。',
+      '12. 每条结论还要给出风险等级（严重/高/中/低/建议），并且只有当「依据」是原文片段时才允许判「严重」或「高」。',
+    ].join('\n'));
   }
   if (searchText) {
     sysParts.push('以下是刚刚联网搜索到的资料（可能过时或不完整），回答时参考它，并说明依据。\n\n' + searchText);
@@ -763,7 +869,7 @@ function buildMessages(member, extra, kbText, searchText) {
 
 function kbKey(wantImages) {
   const files = state.kb.files.map((f) => f.path + ':' + (f.chars || 0)).join('|');
-  return `${files}::${state.kb.budget}::${wantImages ? 'img' : 'ocr'}`;
+  return `${files}::${state.kb.budget}::${wantImages ? 'img' : 'ocr'}::${state.currentIssueId || ''}`;
 }
 
 async function getKbContext(member) {
@@ -778,12 +884,15 @@ async function getKbContext(member) {
     const ocrMember = state.members.find((m) => m.supportsImages && m.model && providerOf(m));
     const ocr = ocrMember ? { providerId: ocrMember.providerId, model: ocrMember.model } : null;
 
+    const isu = state.currentIssueId ? state.issues.find((x) => x.id === state.currentIssueId) : null;
+    const focus = isu ? `${isu.title} ${isu.brief || ''} ${isu.acceptance || ''}` : query;
     const ctx = await bridge.kbContext({
       files: state.kb.files,
       budget: Number(state.kb.budget) || 12000,
       wantImages,
       ocr,
       query,
+      focus,
     });
     state.kbCache.set(key, ctx);
     return ctx;
@@ -823,6 +932,24 @@ async function prepareSearch(text) {
 }
 
 /* ---------------- 运行成员 ---------------- */
+
+/** 把供应商返回的原始错误补一句人话 */
+function humanizeError(raw) {
+  const t = String(raw || '');
+  if (/service has been disabled|violation of Terms/i.test(t)) {
+    return t + '\n\n【提示】这个账号的模型服务已被供应商停用，需要到供应商后台申诉，或在成员里改用其他供应商/模型。';
+  }
+  if (/无权访问模型|does not have access|not enabled for this token/i.test(t)) {
+    return t + '\n\n【提示】当前 Key 没有该模型的权限，请到供应商后台开通，或换一个模型。';
+  }
+  if (/quota|insufficient_quota|HTTP 429/i.test(t)) {
+    return t + '\n\n【提示】额度或频率受限，等待重置或更换 Key。';
+  }
+  if (/HTTP 5\d\d|EOF|connection reset|ECONNRESET/i.test(t)) {
+    return t + '\n\n【提示】上游连接异常（供应商或网络不稳定），可以直接重试；连续失败建议更换模型。';
+  }
+  return t;
+}
 
 async function runMember(member, opts = {}) {
   const provider = providerOf(member);
@@ -890,7 +1017,7 @@ async function runMember(member, opts = {}) {
       runId,
       providerId: provider.id,
       model: member.model,
-      messages: buildMessages(member, opts.extra, kb.text, state.currentSearchText || ''),
+      messages: buildMessages(member, opts.extra, kb.text, state.currentSearchText || '', kb),
       images: kb.images,
       temperature: typeof member.temp === 'number' ? member.temp : 0.7,
       maxTokens: Number(member.maxTokens) || 0,
@@ -908,7 +1035,7 @@ async function runMember(member, opts = {}) {
       if (/abort|cancel/i.test(String(res.error || ''))) {
         msg.stopped = true;
       } else {
-        msg.error = res.error || '请求失败';
+        msg.error = humanizeError(res.error || '请求失败');
         node.querySelector('.body').insertAdjacentHTML('beforeend', `<div class="err">${escapeHtml(msg.error)}</div>`);
       }
     } else if (!msg.text && res.text) {
@@ -917,7 +1044,7 @@ async function runMember(member, opts = {}) {
     }
   } catch (e) {
     if (/abort|cancel/i.test(String(e.message || e))) msg.stopped = true;
-    else msg.error = String(e.message || e);
+    else msg.error = humanizeError(String(e.message || e));
   } finally {
     clearTimeout(watchdog);
     offDelta();
@@ -1300,9 +1427,9 @@ function pickModerator(enabled) {
   return enabled[0] || state.members[0];
 }
 
-async function askModerator(moderator, instruction, names) {
+async function askModerator(moderator, instruction, names, kb) {
   const provider = providerOf(moderator);
-  const msgs = buildMessages(moderator, instruction);
+  const msgs = buildMessages(moderator, instruction, kb && kb.text, '', kb);
   let firstRaw = '';
 
   // 优先走非流式 JSON 模式：结构化决定比自由文本可靠得多
@@ -1322,7 +1449,7 @@ async function askModerator(moderator, instruction, names) {
       }
     } catch { /* 回退到流式 */ }
   }
-  const raw = await runSilent(moderator, instruction);
+  const raw = await runSilent(moderator, instruction, kb);
   return Object.assign(parsePlan(raw, names), { raw: raw || firstRaw || '' });
 }
 
@@ -1349,7 +1476,15 @@ async function runModerated(rounds, enabled) {
 
   const names = pool.map((m) => m.name);
   const unlimited = rounds === 0;
+
+  // 主持人也必须看到材料
+  let kb = { text: '', inventory: [], truncated: [] };
+  try {
+    const c = await getKbContext(moderator);
+    if (c && typeof c === 'object') kb = c;
+  } catch { /* 忽略 */ }
   let conclusion = '';
+  let verdict = '';
   let finished = false;
 
   const curIssue = state.currentIssueId ? state.issues.find((x) => x.id === state.currentIssueId) : null;
@@ -1374,22 +1509,24 @@ async function runModerated(rounds, enabled) {
       `可选成员：${names.join('、')}。`,
       issueLine,
       '请阅读群聊记录，决定下一个发言者，并给 TA 一句提示。',
-      '如果你认为讨论已经充分、可以收尾了，就输出 {"done":true,"conclusion":"本议题的最终结论"} 来结束讨论；结论要具体、可执行。',
-      '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true,"conclusion":"结论"}',
+      '如果你认为讨论已经充分、可以收尾了，就输出 {"done":true,"verdict":"不通过|通过|高风险|需实测","conclusion":"本议题的最终结论"} 来结束讨论。',
+      'verdict 必须是 不通过 / 通过 / 高风险 / 需实测 四者之一。只要能读到完整实现就应给出确定判定，不要一律写「需实测」；结论要具体、可执行，并带文件与行号依据。',
+      '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true,"verdict":"不通过","conclusion":"结论"}',
     ].filter(Boolean).join('\n');
 
-    let plan = await askModerator(moderator, instruction, names);
+    let plan = await askModerator(moderator, instruction, names, kb);
 
     // 解析失败：用更严格的指令重试一次
     if (!plan.valid) {
       const strict = '只输出一行 JSON，不要任何解释、不要 markdown、不要前后缀。'
         + '格式只有两种：{"next":"成员名","prompt":"提示"} 或 {"done":true,"conclusion":"结论"}。'
         + `成员名只能是：${names.join('、')}。`;
-      plan = await askModerator(moderator, strict, names);
+      plan = await askModerator(moderator, strict, names, kb);
     }
 
     if (plan.done) {
       conclusion = plan.conclusion || '';
+      verdict = plan.verdict || '';
       finished = true;
       pushSystem(`主持人 ${moderator.name} 宣布讨论结束。${conclusion ? '\n\n结论：' + conclusion : ''}`);
       break;
@@ -1445,7 +1582,7 @@ async function runModerated(rounds, enabled) {
   if (i >= cap && !state.stopRequested && !finished) {
     pushContinuePrompt(cap);
   }
-  return { finished, conclusion };
+  return { finished, conclusion, verdict };
 }
 
 /** 提取文本里所有平衡的 JSON 对象（模型常在 JSON 前后夹带解释） */
@@ -1487,11 +1624,15 @@ function parsePlan(text, names) {
       const next = String(obj.next || obj.name || obj.speaker || obj.member || '').trim();
       const done = obj.done === true
         || /^(结束|停止|收尾|完成|end|stop|finish|done)$/i.test(next);
+      const VERDICTS = ['不通过', '通过', '高风险', '需实测'];
+      let verdict = String(obj.verdict || obj.judgement || obj.judgment || '').trim();
+      if (!VERDICTS.includes(verdict)) verdict = '';
       return {
         done,
         next,
         prompt: String(obj.prompt || obj.question || obj.instruction || ''),
         conclusion: String(obj.conclusion || obj.summary || obj.result || ''),
+        verdict,
         valid: true,
       };
     } catch { /* 试下一个候选 */ }
@@ -1506,10 +1647,10 @@ function parsePlan(text, names) {
     return { done: true, next: '', prompt: '', conclusion: '', valid: true };
   }
 
-  return { done: false, next: '', prompt: '', conclusion: '', valid: false };
+    return { done: false, next: '', prompt: '', conclusion: '', verdict: '', valid: false };
 }
 
-async function runSilent(member, extra) {
+async function runSilent(member, extra, kb) {
   const provider = providerOf(member);
   if (!provider) return '';
   await pauseGate();
@@ -1523,7 +1664,7 @@ async function runSilent(member, extra) {
       runId,
       providerId: provider.id,
       model: member.model,
-      messages: buildMessages(member, extra),
+      messages: buildMessages(member, extra, kb && kb.text, '', kb),
       temperature: 0.4,
       reasoning: member.reasoning || 'off',
     });
@@ -1750,8 +1891,8 @@ async function applyPlan() {
       persona: t.persona || t.role || '',
       temp: 0.7,
       maxTokens: 0,
-      reasoning: 'off',
-      supportsImages: false,
+      reasoning: 'high',
+      supportsImages: true,
       color: t.color || PALETTE[i % PALETTE.length],
       enabled: true,
       isModerator: t.isModerator === true,
@@ -1768,6 +1909,10 @@ async function applyPlan() {
   const mod = members.find((m) => m.isModerator) || members[members.length - 1];
   state.settings.mode = 'moderator';
   state.settings.moderatorId = mod.id;
+
+  const totalChars = (state.kb.files || []).reduce((a, f) => a + (Number(f.chars) || 0), 0);
+  const targetBudget = Math.min(Math.max(totalChars + 5000, 60000), 800000);
+  if (Number(state.kb.budget) < targetBudget) state.kb.budget = targetBudget;
 
   $('#modalPlan').hidden = true;
   persistConfig();
@@ -1850,9 +1995,11 @@ function renderIssues() {
 
     const head = document.createElement('div');
     head.className = 'issue-head';
+    const vCls = { '不通过': 'fail', '通过': 'pass', '高风险': 'risk', '需实测': 'test' }[it.verdict] || '';
     head.innerHTML = `
       <span class="pill status-${statusCls}">${statusTxt}</span>
       <span class="name" title="${escapeHtml(it.title)}">${escapeHtml(it.title)}</span>
+      ${it.verdict ? `<span class="verdict v-${vCls}">${escapeHtml(it.verdict)}</span>` : ''}
       <button class="issue-edit" title="编辑议题">✎</button>`;
     row.appendChild(head);
 
@@ -1930,6 +2077,7 @@ async function runIssueQueue(enabled, rounds) {
 
     if (r.finished) {
       issue.conclusion = r.conclusion || '';
+      if (r.verdict) issue.verdict = r.verdict;
       issue.status = 'done';
       state.currentIssueId = null;
       renderIssues();
@@ -2316,12 +2464,29 @@ function bindEvents() {
 
   // Enter 发送；Shift+Enter 换行；输入法合成中（拼音选词）不发送
   $('#input').addEventListener('keydown', (e) => {
+    if (mentionState.open) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveMention(1); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); moveMention(-1); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pickMention(mentionState.index); return; }
+      if (e.key === 'Escape') { e.preventDefault(); closeMention(); return; }
+    }
     if (e.key !== 'Enter') return;
     if (e.isComposing || e.keyCode === 229) return;   // 中文输入法正在选词
     if (e.shiftKey) return;                            // Shift+Enter 换行（走默认行为）
     if (e.ctrlKey || e.metaKey || e.altKey) return;    // 其它组合键不拦截
     e.preventDefault();
     send();
+  });
+
+  $('#input').addEventListener('input', refreshMentionMenu);
+  $('#input').addEventListener('click', refreshMentionMenu);
+  document.addEventListener('mousedown', (e) => {
+    if (!mentionState.open) return;
+    const box = $('#mentionMenu');
+    const input = $('#input');
+    if (box && box.contains(e.target)) return;
+    if (input && e.target === input) return;
+    closeMention();
   });
 
   for (const btn of document.querySelectorAll('.mode')) {
@@ -2556,6 +2721,7 @@ function bindEvents() {
 }
 
 function saveKbToSession() {
+  cancelPendingSave();
   if (state.activeSessionId) {
     bridge.saveSession({
       id: state.activeSessionId,
@@ -2859,14 +3025,26 @@ function buildMarkdown() {
   }
 
   if (state.issues && state.issues.length) {
-    lines.push('', '---', '', '# 议题卡', '');
+    const ORDER = ['不通过', '高风险', '需实测', '通过', '未判定'];
+    const groups = {};
     for (const it of state.issues) {
-      const mark = it.status === 'done' ? '✅' : (it.status === 'active' ? '🔍' : '⏳');
-      lines.push(`## ${mark} ${it.title}`, '');
-      if (it.brief) lines.push(`- 要求：${it.brief}`);
-      if (it.acceptance) lines.push(`- 验收标准：${it.acceptance}`);
-      if (it.conclusion) lines.push(`- 结论：${it.conclusion}`);
-      lines.push('');
+      const k = ORDER.includes(it.verdict) ? it.verdict : '未判定';
+      (groups[k] = groups[k] || []).push(it);
+    }
+    lines.push('', '---', '', '# 议题卡结论', '', '| 判定 | 数量 |', '| --- | --- |');
+    for (const k of ORDER) if (groups[k]) lines.push(`| ${k} | ${groups[k].length} |`);
+
+    for (const k of ORDER) {
+      if (!groups[k]) continue;
+      lines.push('', `## ${k}（${groups[k].length} 张）`, '');
+      for (const it of groups[k]) {
+        const mark = it.status === 'done' ? '✅' : (it.status === 'active' ? '🔍' : '⏳');
+        lines.push(`### ${mark} ${it.title}`, '');
+        if (it.brief) lines.push(`- 要求：${it.brief}`);
+        if (it.acceptance) lines.push(`- 验收标准：${it.acceptance}`);
+        if (it.conclusion) lines.push(`- 结论：${it.conclusion}`);
+        lines.push('');
+      }
     }
   }
   return lines.join('\n');
