@@ -375,8 +375,6 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .app.members-collapsed .members-head { justify-content: center; }
 .app.members-collapsed #btnCollapseMembers { margin-left: 0; }
 
-.hide-in-web { display: none !important; }
-
 /* ---------- Markdown 正文 ---------- */
 .bubble.md { white-space: normal; }
 .bubble.md > *:first-child { margin-top: 0; }
@@ -675,6 +673,18 @@ button:disabled, input:disabled, select:disabled { opacity: .45; cursor: not-all
 /* 议题卡头部：状态与判定一行，标题独占一行，避免窄栏里挤成竖排 */
 .issue .issue-head { flex-wrap: wrap; row-gap: 4px; }
 .issue .issue-head .name { flex: 1 1 100%; order: 5; white-space: normal; }
+
+/* ---------- 需要用户补充时的横幅 ---------- */
+.ask-banner {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 12px 0; padding: 8px 12px;
+  background: rgba(245, 166, 35, .12); border: 1px solid rgba(245, 166, 35, .45);
+  border-radius: 8px; font-size: 12.5px; color: var(--text);
+}
+.ask-banner[hidden] { display: none !important; }
+.ask-banner .ask-icon { flex: none; }
+.ask-banner .ask-text { flex: 1 1 auto; line-height: 1.5; }
+.ask-banner .ask-hint { flex: none; color: var(--muted); font-size: 11px; white-space: nowrap; }
 
 /* ---------- 策划弹窗：统一滚动区，内部不再各自滚动 ---------- */
 .modal-box.scroll-body {

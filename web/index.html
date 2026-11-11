@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; connect-src *; worker-src 'self' blob:; script-src 'self' 'unsafe-inline';">
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:;">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27 x1=%270%27 y1=%270%27 x2=%270%27 y2=%271%27%3E%3Cstop offset=%270%27 stop-color=%27%233A5C9E%27/%3E%3Cstop offset=%271%27 stop-color=%27%2310182C%27/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%27100%27 height=%27100%27 rx=%2722%27 fill=%27url(%23g)%27/%3E%3Ctext x=%2750%27 y=%2771%27 font-size=%2752%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27Microsoft YaHei,sans-serif%27%3E智%3C/text%3E%3C/svg%3E">
   <title>智库 · 网页版</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27 x1=%270%27 y1=%270%27 x2=%270%27 y2=%271%27%3E%3Cstop offset=%270%27 stop-color=%27%233A5C9E%27/%3E%3Cstop offset=%271%27 stop-color=%27%2310182C%27/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%27100%27 height=%27100%27 rx=%2722%27 fill=%27url(%23g)%27/%3E%3Ctext x=%2750%27 y=%2771%27 font-size=%2752%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27Microsoft YaHei,sans-serif%27%3E智%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -72,6 +72,7 @@
 
       <div class="messages" id="messages"></div>
 
+      <div id="askBanner" class="ask-banner" hidden></div>
       <footer class="composer">
         <textarea id="input" rows="3"
           placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea>
@@ -109,7 +110,7 @@
       <button class="ghost add-provider" id="btnAddProvider">+ 添加供应商</button>
       <button class="ghost" id="btnFetchAllModels" style="margin-top:6px">🔄 一键拉取全部模型</button>
 
-      <label class="hide-in-web">代理（留空 = 使用系统代理）
+      <label>代理（留空 = 使用系统代理）
         <input id="proxy" placeholder="http://127.0.0.1:10808" />
       </label>
       <label>安全上限（不限轮数时，最多连续发言多少次；到上限会提示「继续」）
@@ -165,11 +166,26 @@
 
         <!-- 策划组队弹窗 -->
   <div class="modal" id="modalPlan" hidden>
-    <div class="modal-box wide">
+    <div class="modal-box wide scroll-body">
       <h2>策划组队</h2>
       <p class="muted">把审核需求和资料发给策划模型，自动生成审核团队（人数 / 分工 / 提示词 / 模型）和议题卡。</p>
-      <label>审核需求与资料
-        <textarea id="planRequirement" rows="6" placeholder="例如：审核一个 Web 应用，重点看安全、逻辑、体验。以下是需求文档和代码……"></textarea>
+      <div class="modal-body">
+      <label>任务类型
+        <select id="planTaskType">
+          <option value="audit">审核（代码 / 文档合规检查）</option>
+          <option value="discuss">讨论（开放话题、读书、方案评审）</option>
+        </select>
+      </label>
+      <div class="row">
+        <button class="ghost" id="btnRefreshRanking">刷新模型榜单</button>
+        <span class="muted" id="rankingStatus">榜单未加载</span>
+      </div>
+      <label class="inline-toggle" title="开启后会先用策划模型生成检索词，联网检索后把结果存入知识库">
+        <input type="checkbox" id="planAutoSearch" checked />
+        生成方案前先联网检索，并把结果存入资料库
+      </label>
+      <label>需求与资料
+        <textarea id="planRequirement" rows="5" class="auto-grow" placeholder="例如：讨论这本书的第三章观点，或者审核一个 Web 应用的安全性……"></textarea>
       </label>
       <div class="muted" id="planKbHint"></div>
       <div class="row">
@@ -178,14 +194,32 @@
       </div>
       <div id="planDraft" class="plan-draft"></div>
       <label>修改意见（按此重新生成）
-        <input id="planFeedback" placeholder="例如：减少一个成员，增加安全复核，主持人换成最强的模型" />
+        <textarea id="planFeedback" rows="2" class="auto-grow" placeholder="例如：减少一个成员，增加安全复核，主持人换成最强的模型"></textarea>
       </label>
       <div class="row">
         <button class="ghost" id="btnPlanRegenerate">按意见重新生成</button>
       </div>
+      </div>
       <div class="modal-actions">
         <button class="ghost" id="btnPlanClose">取消</button>
         <button class="primary" id="btnPlanApply">确认并应用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 需补充：用户补充弹窗 -->
+  <div class="modal" id="modalSupplement" hidden>
+    <div class="modal-box narrow">
+      <h2 id="supplementTitle">补充</h2>
+      <p class="muted">把缺的信息写在这里，会作为「用户补充的背景」给所有成员；也可以点下面的按钮去补充知识库文件。</p>
+      <textarea id="supplementText" rows="8" class="auto-grow" placeholder="例如：孩子六年级，每周能投入 3 小时，之前学过一点 Scratch……"></textarea>
+      <div class="row">
+        <button class="ghost" id="btnSupplementKb">📚 去补充知识库文件</button>
+      </div>
+      <div class="modal-actions">
+        <button class="ghost" id="btnSupplementClose">取消</button>
+        <button class="ghost" id="btnSupplementSave">仅保存</button>
+        <button class="primary" id="btnSupplementRediscuss">保存并重新讨论</button>
       </div>
     </div>
   </div>
@@ -244,7 +278,7 @@
         <button class="ghost danger" id="btnClearKb">清空全部</button>
       </div>
       <label>注入上限（字符）
-        <input id="kbBudget" type="number" step="1000" min="1000" max="800000" value="12000" />
+        <input id="kbBudget" type="number" step="1000" min="1000" max="2000000" value="12000" />
       </label>
       <div class="row kb-cache-row">
         <span class="muted" id="kbCacheInfo">解析缓存：—</span>
@@ -307,9 +341,9 @@
   </div>
 
   <script src="vendor/mammoth.browser.min.js"></script>
-  <script src="vendor/marked.umd.js"></script>
+<script src="vendor/marked.umd.js"></script>
   <script src="vendor/purify.min.js"></script>
   <script src="web-bridge.js"></script>
-  <script src="app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

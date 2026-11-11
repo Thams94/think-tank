@@ -655,6 +655,170 @@
     return parts.join('\n\n');
   }
 
+  /** 尽量把字节解成正确的中文：BOM → UTF-16 → UTF-8 → GB18030/GBK/Big5 */
+  function decodeBytes(buf) {
+    const bytes = new Uint8Array(buf);
+    if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+      return new TextDecoder('utf-8').decode(bytes).replace(/^\uFEFF/, '');
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+      try { return new TextDecoder('utf-16le').decode(bytes); } catch { /* 继续 */ }
+    }
+    if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+      try { return new TextDecoder('utf-16be').decode(bytes); } catch { /* 继续 */ }
+    }
+    const utf8 = new TextDecoder('utf-8').decode(bytes);
+    const bad = (utf8.match(/\uFFFD/g) || []).length;
+    if (!bad) return utf8;
+    for (const enc of ['gb18030', 'gbk', 'big5']) {
+      try {
+        const alt = new TextDecoder(enc).decode(bytes);
+        const altBad = (alt.match(/\uFFFD/g) || []).length;
+        if (altBad < bad) return alt;
+      } catch { /* 该编码不可用 */ }
+    }
+    return utf8;
+  }
+
+  async function readAsTextSmart(file) {
+    const buf = await readAsArrayBuffer(file);
+    return decodeBytes(buf);
+  }
+
+  /* ---------- EPUB（ZIP + XHTML，用浏览器自带 DecompressionStream） ---------- */
+
+  async function inflateRaw(data) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('当前浏览器不支持解压（请用新版 Chrome / Edge）');
+    const ds = new DecompressionStream('deflate-raw');
+    const stream = new Blob([data]).stream().pipeThrough(ds);
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function zipEntries(buf) {
+    const bytes = new Uint8Array(buf);
+    const view = new DataView(buf);
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65558); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('不是有效的 EPUB（找不到 ZIP 目录）');
+    const count = view.getUint16(eocd + 10, true);
+    let ptr = view.getUint32(eocd + 16, true);
+    const out = new Map();
+
+    for (let n = 0; n < count; n++) {
+      if (ptr + 46 > bytes.length || view.getUint32(ptr, true) !== 0x02014b50) break;
+      const method = view.getUint16(ptr + 10, true);
+      const compSize = view.getUint32(ptr + 20, true);
+      const nameLen = view.getUint16(ptr + 28, true);
+      const extraLen = view.getUint16(ptr + 30, true);
+      const commentLen = view.getUint16(ptr + 32, true);
+      const localOff = view.getUint32(ptr + 42, true);
+      const name = new TextDecoder('utf-8').decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
+      ptr += 46 + nameLen + extraLen + commentLen;
+
+      try {
+        if (view.getUint32(localOff, true) !== 0x04034b50) continue;
+        const lNameLen = view.getUint16(localOff + 26, true);
+        const lExtraLen = view.getUint16(localOff + 28, true);
+        const start = localOff + 30 + lNameLen + lExtraLen;
+        const raw = bytes.subarray(start, start + compSize);
+        if (method === 0) out.set(name, raw);
+        else if (method === 8) out.set(name, await inflateRaw(raw));
+      } catch { /* 单个文件跳过 */ }
+    }
+    return out;
+  }
+
+  function epubStrip(html) {
+    let t = String(html)
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|h[1-6]|li|tr|blockquote|section|figcaption)>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ');
+    t = t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#(\d+);/g, (m, d) => String.fromCodePoint(Number(d)));
+    return t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  async function extractEpub(file) {
+    const files = await zipEntries(await readAsArrayBuffer(file));
+    const dec = (u8) => (u8 ? decodeBytes(u8) : '');
+    const get = (p) => {
+      if (!p) return null;
+      const k = String(p).replace(/^\//, '');
+      return files.get(k) || files.get(decodeURIComponent(k)) || null;
+    };
+
+    const container = dec(get('META-INF/container.xml'));
+    const m = container.match(/<rootfile[^>]+full-path="([^"]+)"/i);
+    if (!m) throw new Error('EPUB 结构异常：找不到 OPF 描述文件');
+    const opfPath = m[1];
+    const opfDir = (opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/')) : '');
+    const opf = dec(get(opfPath));
+    if (!opf) throw new Error('EPUB 结构异常：OPF 为空');
+
+    const manifest = new Map();
+    for (const mm of opf.matchAll(/<item\b[^>]*>/gi)) {
+      const tag = mm[0];
+      const id = (tag.match(/\bid="([^"]+)"/) || [])[1];
+      const href = (tag.match(/\bhref="([^"]+)"/) || [])[1];
+      const mt = (tag.match(/\bmedia-type="([^"]+)"/) || [])[1] || '';
+      if (id && href) manifest.set(id, { href, mt });
+    }
+
+    const order = [];
+    for (const mm of opf.matchAll(/<itemref\b[^>]*>/gi)) {
+      const idref = (mm[0].match(/\bidref="([^"]+)"/) || [])[1];
+      if (idref && manifest.has(idref)) order.push(manifest.get(idref));
+    }
+
+    const title = epubStrip((opf.match(/<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i) || [])[1] || '');
+    const parts = [];
+    const seen = new Set();
+
+    for (const item of order) {
+      if (!/xhtml|html/i.test(item.mt)) continue;
+      const rel = opfDir ? opfDir + '/' + item.href : item.href;
+      const buf = get(rel);
+      if (!buf) continue;
+      const html = dec(buf);
+      if (seen.has(html)) continue;
+      seen.add(html);
+      let chTitle = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+      if (!chTitle) chTitle = (html.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) || [])[1] || '';
+      chTitle = epubStrip(chTitle).slice(0, 60);
+      const text = epubStrip(html);
+      if (text) parts.push({ title: chTitle, text });
+    }
+
+    if (!parts.length) {
+      const list = [];
+      for (const [name, u8] of files) {
+        if (!/\.(xhtml|html|htm)$/i.test(name)) continue;
+        const text = epubStrip(dec(u8));
+        if (text) list.push({ title: name, text });
+      }
+      list.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN', { numeric: true }));
+      parts.push(...list.slice(0, 500));
+    }
+    if (!parts.length) throw new Error('EPUB 里没有可读的章节文本');
+
+    const MAX = 3000000;
+    let body = '';
+    let cut = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const seg = `\n\n【第 ${i + 1} 节｜${parts[i].title || '无标题'}】\n${parts[i].text}`;
+      if (body.length + seg.length > MAX) { cut = parts.length - i; break; }
+      body += seg;
+    }
+    const toc = parts.map((p, i) => `${i + 1}. ${p.title || '无标题'}`);
+    const head = (title ? `【书名】${title}\n` : '')
+      + `【格式】EPUB，共 ${parts.length} 节，提取 ${body.length} 字符\n【目录】\n${toc.join('\n')}`;
+    return head + '\n' + body + (cut ? `\n\n（达到单本提取上限，最后 ${cut} 节未包含）` : '');
+  }
+
   async function parseFile(file) {
     const name = file.name.toLowerCase();
     if (isImage(file.name)) return '';
@@ -666,7 +830,11 @@
       return r.value || '';
     }
     if (name.endsWith('.doc')) throw new Error('旧版 .doc 不支持，请另存为 .docx');
-    return readAsText(file);
+    if (name.endsWith('.epub')) return extractEpub(file);
+    if (name.endsWith('.mobi') || name.endsWith('.azw3') || name.endsWith('.azw')) {
+      throw new Error('暂不支持该格式，请先转成 .epub 或导出 .txt');
+    }
+    return readAsTextSmart(file);
   }
 
   async function kbIndex(paths) {
@@ -1308,6 +1476,57 @@
     run, abort, onDelta,
     kbPick, kbIndex, kbContext, kbDigest,
     kbAddFiles: async (files) => registerFiles(files),
+    kbPickFolder: async () => kbPick(),
+    kbScanFolder: async () => ({ paths: [], truncated: false }),
+    kbCacheInfo: async () => {
+      let count = 0;
+      try {
+        await new Promise((res) => {
+          openDb().then((db) => {
+            const t = db.transaction('kbcache', 'readonly');
+            const q = t.objectStore('kbcache').count();
+            q.onsuccess = () => { count = q.result || 0; res(); };
+            q.onerror = () => res();
+          }).catch(() => res());
+        });
+      } catch { /* 忽略 */ }
+      return { count, bytes: 0, dir: '浏览器 IndexedDB' };
+    },
+    kbClearCache: async () => {
+      try {
+        await new Promise((res) => {
+          openDb().then((db) => {
+            const t = db.transaction('kbcache', 'readwrite');
+            t.objectStore('kbcache').clear();
+            t.oncomplete = () => res();
+            t.onerror = () => res();
+          }).catch(() => res());
+        });
+      } catch { /* 忽略 */ }
+      return { ok: true };
+    },
+    openPath: async () => ({ ok: false }),
+    showContextMenu: async () => ({ ok: false }),
+    rankingCache: async () => {
+      try {
+        const r = await fetch('./data/ranking.json', { cache: 'no-store' });
+        if (!r.ok) return { ok: false, error: 'HTTP ' + r.status };
+        const j = await r.json();
+        return Object.assign({ ok: true }, j);
+      } catch (e) {
+        return { ok: false, error: String(e.message || e) };
+      }
+    },
+    rankingFetch: async () => {
+      try {
+        const r = await fetch('./data/ranking.json', { cache: 'no-store' });
+        if (!r.ok) return { ok: false, error: 'HTTP ' + r.status };
+        const j = await r.json();
+        return Object.assign({ ok: true }, j);
+      } catch (e) {
+        return { ok: false, error: String(e.message || e) };
+      }
+    },
     webSearch,
     exportMarkdown,
     diagDump, refocus,
