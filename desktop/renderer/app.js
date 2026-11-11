@@ -1083,6 +1083,12 @@ function humanizeError(raw) {
   if (/quota|insufficient_quota|HTTP 429/i.test(t)) {
     return t + '\n\n【提示】额度或频率受限，等待重置或更换 Key。';
   }
+  if (/ERR_TIMED_OUT|timed? ?out|ETIMEDOUT|ERR_NETWORK|ERR_CONNECTION|ERR_NAME|ERR_PROXY/i.test(t)) {
+    return t + '\n\n【提示】网络层超时/连不上：可能是代理没开、线路不稳，或该供应商暂时不可达。'
+      + '\n- 检查「设置 → 代理」是否填对（不填则走系统代理）'
+      + '\n- 换一条线路或稍后重试'
+      + '\n- 如果每次都超时，把该成员的供应商换成另一个';
+  }
   if (/HTTP 5\d\d|EOF|connection reset|ECONNRESET/i.test(t)) {
     return t + '\n\n【提示】上游连接异常（供应商或网络不稳定），可以直接重试；连续失败建议更换模型。';
   }
@@ -2196,19 +2202,25 @@ async function runPlanner(feedback) {
   });
 
   if (!res.ok) {
-    $('#planStatus').textContent = '策划失败：' + String(res.error || '未知错误');
+    const raw = String(res.error || '未知错误');
+    const net = /ERR_TIMED_OUT|ERR_CONNECTION|ERR_NETWORK|ERR_NAME|timed? ?out|ETIMEDOUT|ECONNRESET/i.test(raw);
+    $('#planStatus').textContent = net
+      ? `策划请求超时/连不上（${raw.slice(0, 60)}）。请检查「设置 → 代理」或换一条线路，再点「按意见重新生成」重试。`
+      : '策划失败：' + raw;
     return false;
   }
   const plan = parsePlanJson(res.text);
   if (!plan) {
     state.draftPlan.raw = res.text;
-    $('#planStatus').textContent = '返回内容不是合法 JSON，无法解析。';
+    $('#planStatus').textContent = '模型这次返回的内容无法解析。旧方案仍然保留，可以点「按意见重新生成」重试。';
     renderPlanDraft();
     return false;
   }
+  // 模型偶尔只返回一半（例如只有 issues 没有 team）：不要用它把已有方案清空
   state.draftPlan.questions = plan.questions || [];
-  state.draftPlan.team = plan.team;
-  state.draftPlan.issues = plan.issues;
+  if (plan.team.length) state.draftPlan.team = plan.team;
+  else if (!(state.draftPlan.team || []).length) state.draftPlan.team = [];
+  if (plan.issues.length) state.draftPlan.issues = plan.issues;
   state.draftPlan.raw = '';
   if (feedback) state.draftPlan.feedback.push(feedback);
   const nRes = (state.draftPlan.researched || []).length;
@@ -2295,9 +2307,12 @@ function renderPlanDraft() {
 /** 没有方案时，禁用「修改意见 / 重新生成 / 确认并应用」 */
 function updatePlanActions() {
   const hasPlan = (state.draftPlan.team || []).length > 0;
-  for (const sel of ['#planFeedback', '#btnPlanRegenerate', '#btnPlanApply']) {
+  // 只有「确认并应用」依赖方案；修改意见与重新生成必须一直可用，否则失败后无法重试
+  const apply = $('#btnPlanApply');
+  if (apply) apply.disabled = !hasPlan;
+  for (const sel of ['#planFeedback', '#btnPlanRegenerate']) {
     const el = $(sel);
-    if (el) el.disabled = !hasPlan;
+    if (el) el.disabled = false;
   }
 }
 
@@ -2308,15 +2323,38 @@ async function submitSupplements() {
   document.querySelectorAll('#planDraft .plan-answer').forEach((el) => {
     const i = Number(el.dataset.i);
     const a = String(el.value || '').trim();
-    if (a) answers.push({ q: (qs[i] && qs[i].q) || `问题${i + 1}`, a });
+    if (a) answers.push({ q: (qs[i] && qs[i].q) || `问题${i + 1}`, a, i });
   });
   if (!answers.length) {
     $('#planStatus').textContent = '还没有填写任何补充内容';
     return;
   }
+
+  const btn = $('#btnSubmitSupplements');
+  if (btn) { btn.disabled = true; btn.textContent = '正在重新生成…'; }
+
+  const prevCount = (state.draftPlan.supplements || []).length;
   state.draftPlan.supplements = (state.draftPlan.supplements || []).concat(answers);
   state.draftPlan.questions = [];
-  await runPlanner(null);
+
+  let ok = false;
+  try {
+    ok = await runPlanner(null);
+  } finally {
+    if (!ok) {
+      // 失败：撤销这次补充，恢复问题与已填答案，按钮恢复可点
+      state.draftPlan.supplements = (state.draftPlan.supplements || []).slice(0, prevCount);
+      state.draftPlan.questions = qs;
+      renderPlanDraft();
+      document.querySelectorAll('#planDraft .plan-answer').forEach((el) => {
+        const i = Number(el.dataset.i);
+        const hit = answers.find((a) => a.i === i);
+        if (hit) el.value = hit.a;
+      });
+    }
+    const b2 = $('#btnSubmitSupplements');
+    if (b2) { b2.disabled = false; b2.textContent = '提交补充并重新生成'; }
+  }
 }
 
 async function applyPlan() {

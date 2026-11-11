@@ -64,6 +64,38 @@ async function httpFetch(url, opts = {}) {
   return fetch(url, opts);
 }
 
+const NET_ERR_RE = /ERR_TIMED_OUT|ERR_CONNECTION|ERR_NETWORK|ERR_NAME|ERR_PROXY|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|network connection was lost|aborted/i;
+
+function isNetError(e) {
+  return NET_ERR_RE.test(String((e && e.message) || e || ''));
+}
+
+/** 带超时与重试的请求：网络类错误自动重试，其它错误直接抛 */
+async function fetchRetry(url, opts = {}, { attempts = 2, timeoutMs = 150000, label = '请求' } = {}) {
+  let lastErr = null;
+  for (let i = 1; i <= attempts; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      try { ctrl.abort(new Error('ERR_TIMED_OUT')); } catch { /* 忽略 */ }
+    }, timeoutMs);
+    try {
+      const res = await httpFetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+      clearTimeout(timer);
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+      const msg = String((e && e.message) || e || '');
+      if (!isNetError(e) && !/aborted/i.test(msg)) throw e;
+      if (i < attempts) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+  const err = new Error(`${label}超时或连不上（${String((lastErr && lastErr.message) || lastErr).slice(0, 80)}），已重试 ${attempts} 次`);
+  throw err;
+}
+
 function applyProxy(cfg) {
   const rules = (cfg && cfg.proxy ? String(cfg.proxy) : '').trim();
   try {
@@ -239,16 +271,33 @@ async function streamChat({ baseUrl, apiKey, model, messages, temperature, signa
   const wantReasoning = reasoning && reasoning !== 'off' ? String(reasoning) : null;
   if (wantReasoning) body.reasoning_effort = wantReasoning;
 
-  const res = await httpFetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
+  // 连接阶段加超时：90 秒还没拿到响应头就报错（拿不到头 = 线路卡住）
+  const connectCtrl = new AbortController();
+  const connectTimer = setTimeout(() => {
+    try { connectCtrl.abort(new Error('ERR_TIMED_OUT')); } catch { /* 忽略 */ }
+  }, 90000);
+  const onUserAbort = () => { try { connectCtrl.abort(); } catch { /* 忽略 */ } };
+  if (signal) {
+    if (signal.aborted) onUserAbort();
+    else signal.addEventListener('abort', onUserAbort, { once: true });
+  }
+
+  let res;
+  try {
+    res = await httpFetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(body),
+      signal: connectCtrl.signal,
+    });
+  } finally {
+    clearTimeout(connectTimer);
+    if (signal) signal.removeEventListener('abort', onUserAbort);
+  }
 
   if (!res.ok) {
     let text = await res.text();
@@ -358,9 +407,9 @@ async function completeChat({ baseUrl, apiKey, model, messages, temperature, max
     'Content-Type': 'application/json',
   };
 
-  let res = await httpFetch(`${base}/chat/completions`, {
+  let res = await fetchRetry(`${base}/chat/completions`, {
     method: 'POST', headers, body: JSON.stringify(body),
-  });
+  }, { attempts: 2, timeoutMs: 150000, label: '模型请求' });
 
   // 服务端不认 response_format / reasoning_effort：去掉后重试一次
   if (!res.ok) {
