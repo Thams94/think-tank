@@ -1,5 +1,34 @@
 # 更新记录
 
+## v0.7.6（当前）
+
+### 安装包精简：102.8 MB → 80.4 MB（-22%）
+
+逐项查了体积构成，砍掉三块：
+
+| 项 | 之前 | 现在 | 省下 |
+|---|---|---|---|
+| 语言包（Electron 自带 50 多个） | 40.3 MB | 0.9 MB | **39 MB** |
+| sourcemap（pdfjs / pdf-parse） | ~15 MB | 0 | **15 MB** |
+| @napi-rs/canvas（25 MB skia + 10 MB icudtl） | 35 MB | 0 | **35 MB** |
+
+**关键改动：PDF 解析换成 pdfjs-dist 直接用**
+
+`pdf-parse` 硬依赖 `@napi-rs/canvas`（编进 25MB 的 skia 二进制 + 10MB 字库），但它只是渲染页面用的，抽文字并不需要。改成直接调用 `pdfjs-dist` 的 `getTextContent()`，并补了一个轻量 `DOMMatrix`（Electron 主进程没有这个 API）。
+
+实测：PDF 抽文本正常（2 页名单 424 字），且不需要任何原生二进制。
+
+另外：`electronLanguages` 只保留 `zh-CN` / `en-US`，打包时排除 `*.map`。
+
+### 回归验证
+
+```
+PDF 解析     ok=true，424 字 ✓
+EPUB        书名/目录/正文/完整注入 ✓
+GBK 文本     2139 字，乱码 0 ✓
+开始/继续    开始讨论 → 继续讨论 ✓
+```
+
 ## v0.7.5（当前）
 
 ### 补充资料后，一键重跑全部议题卡

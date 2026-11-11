@@ -884,6 +884,83 @@ function decodeTextBuffer(buf) {
   return utf8;
 }
 
+/** Electron 主进程没有 DOMMatrix，pdfjs 抽文本时会用到，这里补一个 2D 版本 */
+function ensureDomMatrix() {
+  if (typeof globalThis.DOMMatrix !== 'undefined') return;
+  globalThis.DOMMatrix = class DOMMatrix {
+    constructor(init) {
+      this.a = 1; this.b = 0; this.c = 0; this.d = 1; this.e = 0; this.f = 0;
+      if (Array.isArray(init) && init.length >= 6) {
+        [this.a, this.b, this.c, this.d, this.e, this.f] = init;
+      } else if (init && typeof init === 'object') {
+        for (const k of ['a', 'b', 'c', 'd', 'e', 'f']) if (k in init) this[k] = init[k];
+      }
+      this.is2D = true;
+    }
+    multiply(o) { return new globalThis.DOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]).multiplySelf(o); }
+    multiplySelf(o) {
+      const a = this.a; const b = this.b; const c = this.c; const d = this.d; const e = this.e; const f = this.f;
+      const A = o.a; const B = o.b; const C = o.c; const D = o.d; const E = o.e; const F = o.f;
+      this.a = a * A + b * C; this.b = a * B + b * D;
+      this.c = c * A + d * C; this.d = c * B + d * D;
+      this.e = e * A + f * C + E; this.f = e * B + f * D + F;
+      return this;
+    }
+    translate(x = 0, y = 0) { return this.multiplySelf({ a: 1, b: 0, c: 0, d: 1, e: x, f: y }); }
+    scale(x = 1, y = x) { return this.multiplySelf({ a: x, b: 0, c: 0, d: y, e: 0, f: 0 }); }
+    invertSelf() {
+      const det = this.a * this.d - this.b * this.c || 1e-12;
+      const a = this.a; const b = this.b; const c = this.c; const d = this.d; const e = this.e; const f = this.f;
+      this.a = d / det; this.b = -b / det; this.c = -c / det; this.d = a / det;
+      this.e = (c * f - d * e) / det; this.f = (b * e - a * f) / det;
+      return this;
+    }
+    get isIdentity() { return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 && this.e === 0 && this.f === 0; }
+    toString() { return `matrix(${this.a}, ${this.b}, ${this.c}, ${this.d}, ${this.e}, ${this.f})`; }
+  };
+}
+
+let pdfjsPromise = null;
+function loadPdfJs() {
+  if (!pdfjsPromise) {
+    ensureDomMatrix();
+    pdfjsPromise = import('pdfjs-dist/legacy/build/pdf.mjs');
+  }
+  return pdfjsPromise;
+}
+
+/** 用 pdfjs 抽 PDF 文本（纯 JS，不需要 canvas） */
+async function pdfExtract(filePath) {
+  const pdfjs = await loadPdfJs();
+  const data = new Uint8Array(fs.readFileSync(filePath));
+  const doc = await pdfjs.getDocument({
+    data,
+    useSystemFonts: true,
+    isEvalSupported: false,
+    disableFontFace: true,
+    verbosity: 0,
+  }).promise;
+  try {
+    const parts = [];
+    const max = Math.min(doc.numPages, 3000);
+    for (let i = 1; i <= max; i++) {
+      const page = await doc.getPage(i);
+      const tc = await page.getTextContent();
+      let line = '';
+      for (const it of tc.items) {
+        line += it.str || '';
+        if (it.hasEOL) line += '\n';
+      }
+      const t = line.trim();
+      if (t) parts.push(t);
+      page.cleanup();
+    }
+    return parts.join('\n\n');
+  } finally {
+    try { await doc.destroy(); } catch { /* 忽略 */ }
+  }
+}
+
 async function extractText(filePath) {
   const ext = path.extname(filePath).toLowerCase();
 
@@ -892,16 +969,7 @@ async function extractText(filePath) {
   }
 
   if (ext === '.pdf') {
-    // pdf-parse v2 导出的是 PDFParse 类
-    const { PDFParse } = require('pdf-parse');
-    const buf = fs.readFileSync(filePath);
-    const parser = new PDFParse({ data: buf });
-    try {
-      const result = await parser.getText();
-      return (result.text || '').replace(/\n-- \d+ of \d+ --\n?$/, '\n');
-    } finally {
-      try { await parser.destroy(); } catch { /* 忽略 */ }
-    }
+    return pdfExtract(filePath);
   }
 
   if (ext === '.docx') {

@@ -1,6 +1,6 @@
 {
   "name": "think-tank",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "智库：多模型审核工作台，自动组建审核团队并按议题逐项推进",
   "main": "main.js",
   "author": "local",
@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
-    "electron": "^33.0.0",
+    "electron": "^33.4.11",
     "electron-builder": "^26.18.0"
   },
   "build": {
@@ -30,7 +30,14 @@
       "renderer/**/*",
       "tools/ocr.ps1",
       "assets/**/*",
-      "package.json"
+      "package.json",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.txt",
+      "!**/LICENSE*",
+      "!**/.bin/**",
+      "!node_modules/@napi-rs/**",
+      "!node_modules/pdf-parse/**"
     ],
     "win": {
       "target": [
@@ -59,12 +66,14 @@
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true
     },
-    "asarUnpack": [
-      "**/node_modules/pdf-parse/**"
+    "asarUnpack": [],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
     ]
   },
   "dependencies": {
     "mammoth": "^1.13.0",
-    "pdf-parse": "^2.4.5"
+    "pdfjs-dist": "^5.4.296"
   }
 }
