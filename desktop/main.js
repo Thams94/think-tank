@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, net, session, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, net, session, dialog, clipboard } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -857,6 +857,15 @@ function parseAaRanking(html) {
     .sort((a, b) => b.score - a.score)
     .map((m, i) => Object.assign(m, { rank: i + 1 }));
 }
+
+ipcMain.handle('clipboard:write', (_e, text) => {
+  try {
+    clipboard.writeText(String(text == null ? '' : text));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+});
 
 ipcMain.handle('ranking:fetch', async () => {
   try {

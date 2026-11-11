@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   // 联网搜索
   webSearch: (payload) => ipcRenderer.invoke('websearch:run', payload),
   rankingFetch: () => ipcRenderer.invoke('ranking:fetch'),
+  copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   rankingCache: () => ipcRenderer.invoke('ranking:cache'),
 
   // 知识库

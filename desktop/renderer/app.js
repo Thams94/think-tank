@@ -747,6 +747,7 @@ function messageNode(m) {
   let acts = m.role === 'assistant'
     ? '<button class="act" data-act="regen">重新生成</button>'
     : '<button class="act" data-act="edit">编辑</button>';
+  acts = '<button class="act" data-act="copy">复制</button>' + acts;
   if (m.role === 'assistant' && (m.truncated || m.interrupted)) {
     acts = '<button class="act go" data-act="cont">继续生成</button>' + acts;
   }
@@ -1311,7 +1312,80 @@ function cutFrom(msgId) {
   persistChat();
 }
 
+/* ---------------- 复制到剪贴板 ---------------- */
+
+/** 复制文本：优先走主进程剪贴板，其次浏览器 API，最后 execCommand 兜底 */
+async function copyText(text) {
+  const t = String(text == null ? '' : text);
+  if (!t) return false;
+  try {
+    if (typeof bridge.copyText === 'function') {
+      const r = await bridge.copyText(t);
+      if (r && r.ok) return true;
+    }
+  } catch { /* 继续兜底 */ }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch { /* 继续兜底 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 把整段对话拼成纯文本 */
+function chatToText() {
+  const out = [];
+  for (const m of state.messages) {
+    if (m.role === 'system') {
+      if (!m.text) continue;
+      out.push(m.text.split('\n').map((l) => '> ' + l).join('\n'));
+      continue;
+    }
+    const who = m.role === 'user'
+      ? '我'
+      : (m.name || (state.members.find((x) => x.id === m.memberId) || {}).name || '成员');
+    const priv = m.visibility === 'private' ? '（私密）' : '';
+    out.push(`${who}${priv}：\n${m.text || ''}`.trimEnd());
+  }
+  return out.join('\n\n');
+}
+
+/** 按钮文字短暂变「已复制」 */
+function flashCopied(btn, label) {
+  if (!btn) return;
+  const old = btn.dataset.origText || btn.textContent;
+  btn.dataset.origText = old;
+  btn.textContent = label || '已复制';
+  clearTimeout(btn._copyTimer);
+  btn._copyTimer = setTimeout(() => { btn.textContent = old; }, 1400);
+}
+
+async function copyWholeChat(btn) {
+  const text = chatToText();
+  if (!text) { if (btn) flashCopied(btn, '对话为空'); return; }
+  const ok = await copyText(text);
+  if (btn) flashCopied(btn, ok ? '已复制' : '复制失败');
+}
+
 function onMessageAction(m, act) {
+  if (act === 'copy') {
+    const body = m.text || '';
+    copyText(body).then((ok) => pushSystem(ok ? '已复制这条消息' : '复制失败，请手动选中复制'));
+    return;
+  }
   if (state.running) { pushSystem('正在生成，请先点「停止」'); return; }
   if (act === 'cut') { cutFrom(m.id); return; }
   if (act === 'cont') { continueMessage(m); return; }
@@ -3225,6 +3299,7 @@ function bindEvents() {
   $('#btnSettings').onclick = openSettings;
   bindContextMenu();
   $('#btnKb').onclick = openKb;
+  if ($('#btnCopyChat')) $('#btnCopyChat').onclick = (e) => copyWholeChat(e.currentTarget);
   $('#btnSupplementClose').onclick = closeSupplement;
   $('#btnSupplementSave').onclick = () => saveSupplement(false);
   $('#btnSupplementRediscuss').onclick = () => saveSupplement(true);
