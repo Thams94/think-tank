@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, net, session, dia
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 
 // 数据目录固定为 %APPDATA%/think-tank，
 // 否则打包后应用名变化会指向另一个目录，看起来像"配置丢了"。
@@ -537,6 +538,145 @@ function stripTags(html) {
   ).replace(/\s+/g, ' ').trim();
 }
 
+/* ---------- EPUB：ZIP 容器 + XHTML，无需第三方库 ---------- */
+
+/** 极简 ZIP 读取：解析 central directory，返回 文件名 -> Buffer */
+function zipReadAll(buf) {
+  const entries = new Map();
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 65558); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是有效的 EPUB（找不到 ZIP 目录）');
+  const count = buf.readUInt16LE(eocd + 10);
+  let ptr = buf.readUInt32LE(eocd + 16);
+
+  for (let n = 0; n < count; n++) {
+    if (ptr + 46 > buf.length || buf.readUInt32LE(ptr) !== 0x02014b50) break;
+    const method = buf.readUInt16LE(ptr + 10);
+    const compSize = buf.readUInt32LE(ptr + 20);
+    const nameLen = buf.readUInt16LE(ptr + 28);
+    const extraLen = buf.readUInt16LE(ptr + 30);
+    const commentLen = buf.readUInt16LE(ptr + 32);
+    const localOff = buf.readUInt32LE(ptr + 42);
+    const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
+    ptr += 46 + nameLen + extraLen + commentLen;
+
+    try {
+      if (buf.readUInt32LE(localOff) !== 0x04034b50) continue;
+      const lNameLen = buf.readUInt16LE(localOff + 26);
+      const lExtraLen = buf.readUInt16LE(localOff + 28);
+      const dataStart = localOff + 30 + lNameLen + lExtraLen;
+      const data = buf.subarray(dataStart, dataStart + compSize);
+      if (method === 0) entries.set(name, Buffer.from(data));
+      else if (method === 8) entries.set(name, zlib.inflateRawSync(data));
+    } catch { /* 单个文件损坏就跳过 */ }
+  }
+  return entries;
+}
+
+/** 保留段落换行的 XHTML 转文本 */
+function epubStrip(html) {
+  let t = String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li|tr|blockquote|section|figcaption)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  t = decodeEntities(t);
+  return t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 解析 EPUB：按 spine 顺序抽出全部章节文本，顶部带目录 */
+function epubExtract(filePath) {
+  const buf = fs.readFileSync(filePath);
+  const files = zipReadAll(buf);
+  const get = (p) => {
+    if (!p) return null;
+    const key = String(p).replace(/^\//, '');
+    return files.get(key) || files.get(decodeURIComponent(key)) || null;
+  };
+
+  // container.xml → OPF
+  const container = get('META-INF/container.xml');
+  const containerText = container ? decodeTextBuffer(container) : '';
+  const m = containerText.match(/<rootfile[^>]+full-path="([^"]+)"/i);
+  if (!m) throw new Error('EPUB 结构异常：找不到 OPF 描述文件');
+  const opfPath = m[1];
+  const opfDirRaw = path.posix.dirname(opfPath);
+  const opfDir = opfDirRaw && opfDirRaw !== '.' ? opfDirRaw : '';
+  const opfBuf = get(opfPath);
+  const opf = opfBuf ? decodeTextBuffer(opfBuf) : '';
+  if (!opf) throw new Error('EPUB 结构异常：OPF 文件为空');
+
+  // manifest：id -> {href, media-type}
+  const manifest = new Map();
+  for (const mm of opf.matchAll(/<item\b[^>]*>/gi)) {
+    const tag = mm[0];
+    const id = (tag.match(/\bid="([^"]+)"/) || [])[1];
+    const href = (tag.match(/\bhref="([^"]+)"/) || [])[1];
+    const mt = (tag.match(/\bmedia-type="([^"]+)"/) || [])[1] || '';
+    if (id && href) manifest.set(id, { href, mt });
+  }
+
+  // spine 顺序
+  const order = [];
+  for (const mm of opf.matchAll(/<itemref\b[^>]*>/gi)) {
+    const idref = (mm[0].match(/\bidref="([^"]+)"/) || [])[1];
+    if (idref && manifest.has(idref)) order.push(manifest.get(idref));
+  }
+
+  const bookTitle = stripTags((opf.match(/<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i) || [])[1] || '');
+
+  const parts = [];
+  const seen = new Set();
+  for (const item of order) {
+    if (!item || !/xhtml|html/i.test(item.mt)) continue;
+    const rel = opfDir ? opfDir + '/' + item.href : item.href;
+    const doc = get(rel);
+    if (!doc) continue;
+    const html = decodeTextBuffer(doc);
+    if (seen.has(html)) continue;
+    seen.add(html);
+
+    let chTitle = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+    if (!chTitle) chTitle = (html.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) || [])[1] || '';
+    chTitle = epubStrip(chTitle).slice(0, 60);
+
+    const text = epubStrip(html);
+    if (text) parts.push({ title: chTitle, text });
+  }
+
+  // 兜底：spine 没解析出来，就按文件名自然序读所有 HTML
+  if (!parts.length) {
+    const list = [];
+    for (const [name, data] of files) {
+      if (!data || !/\.(xhtml|html|htm)$/i.test(name)) continue;
+      const text = epubStrip(decodeTextBuffer(data));
+      if (text) list.push({ title: name, text });
+    }
+    list.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN', { numeric: true }));
+    parts.push(...list.slice(0, 500));
+  }
+  if (!parts.length) throw new Error('EPUB 里没有可读的章节文本');
+
+  const MAX_CHARS = 3000000;
+  let body = '';
+  let cut = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const seg = `\n\n【第 ${i + 1} 节｜${parts[i].title || '无标题'}】\n${parts[i].text}`;
+    if (body.length + seg.length > MAX_CHARS) { cut = parts.length - i; break; }
+    body += seg;
+  }
+
+  const toc = parts.map((p, i) => `${i + 1}. ${p.title || '无标题'}`);
+  const head =
+    (bookTitle ? `【书名】${bookTitle}\n` : '') +
+    `【格式】EPUB，共 ${parts.length} 节，提取 ${body.length} 字符\n` +
+    `【目录】\n${toc.join('\n')}`;
+  return head + '\n' + body + (cut ? `\n\n（达到单本提取上限，最后 ${cut} 节未包含）` : '');
+}
+
 async function fetchText(url, timeoutMs = 15000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -630,6 +770,71 @@ ipcMain.handle('websearch:run', async (_e, { query, fetchPages = 3, maxChars = 1
   return { ok: true, source: sources[0], results: results.slice(0, 8), pages, error: null };
 });
 
+/* ---------------- 模型榜单（Artificial Analysis 智能指数） ---------------- */
+
+const RANKING_FILE = path.join(USER_DIR, 'ranking.json');
+const RANKING_URL = 'https://artificialanalysis.ai/leaderboards/models';
+
+/** 从 AA 页面的 RSC 负载里抽出 initialModels（含 intelligenceIndex） */
+function parseAaRanking(html) {
+  const text = String(html).replace(/\\"/g, '"');
+  const at = text.indexOf('"initialModels":[');
+  if (at < 0) return [];
+  const start = text.indexOf('[', at);
+  let depth = 0;
+  let end = -1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '[') depth++;
+    else if (ch === ']') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return [];
+
+  let arr;
+  try { arr = JSON.parse(text.slice(start, end + 1)); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+
+  return arr
+    .filter((m) => m && typeof m.intelligenceIndex === 'number' && m.name)
+    .map((m) => ({
+      name: String(m.name),
+      slug: String(m.slug || ''),
+      creator: String(m.modelCreatorName || ''),
+      score: Number(m.intelligenceIndex),
+      context: Number(m.contextWindowTokens) || 0,
+      priceOut: Number(m.price1mOutputTokens) || null,
+      openWeights: m.isOpenWeights === true,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .map((m, i) => Object.assign(m, { rank: i + 1 }));
+}
+
+ipcMain.handle('ranking:fetch', async () => {
+  try {
+    const { status, text } = await fetchText(RANKING_URL, 60000);
+    if (status !== 200) return { ok: false, error: 'HTTP ' + status };
+    const models = parseAaRanking(text);
+    if (!models.length) return { ok: false, error: '页面结构变化，未解析到榜单数据' };
+    const payload = { updatedAt: Date.now(), source: RANKING_URL, models };
+    try { fs.writeFileSync(RANKING_FILE, JSON.stringify(payload)); } catch { /* 缓存失败不影响返回 */ }
+    appendDiag({ kind: 'ranking', models: models.length, top: models[0] && models[0].name });
+    return Object.assign({ ok: true }, payload);
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+});
+
+ipcMain.handle('ranking:cache', () => {
+  try {
+    if (!fs.existsSync(RANKING_FILE)) return { ok: false, error: '没有缓存' };
+    const data = JSON.parse(fs.readFileSync(RANKING_FILE, 'utf8'));
+    if (!data || !Array.isArray(data.models)) return { ok: false, error: '缓存损坏' };
+    return Object.assign({ ok: true }, data);
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+});
+
 /* ---------------- 知识库 ---------------- */
 
 const TEXT_EXTS = new Set([
@@ -642,7 +847,7 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 function fileHash(p) {
   try {
     const st = fs.statSync(p);
-    return crypto.createHash('sha1').update(p + ':' + st.size + ':' + st.mtimeMs).digest('hex').slice(0, 16);
+    return crypto.createHash('sha1').update('v2:' + p + ':' + st.size + ':' + st.mtimeMs).digest('hex').slice(0, 16);
   } catch {
     return crypto.createHash('sha1').update(p).digest('hex').slice(0, 16);
   }
@@ -652,11 +857,38 @@ function cachePath(p) {
   return path.join(KB_CACHE_DIR, fileHash(p) + '.txt');
 }
 
+/** 尽量把字节解成正确的中文：BOM → UTF-16 → UTF-8 → GB18030/GBK/Big5 */
+function decodeTextBuffer(buf) {
+  if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+    return buf.toString('utf8').replace(/^\uFEFF/, '');
+  }
+  if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) {
+    try { return new TextDecoder('utf-16le').decode(buf); } catch { /* 继续 */ }
+  }
+  if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) {
+    try { return new TextDecoder('utf-16be').decode(buf); } catch { /* 继续 */ }
+  }
+
+  const utf8 = buf.toString('utf8');
+  const bad = (utf8.match(/\uFFFD/g) || []).length;
+  if (!bad) return utf8;
+
+  // 有替换符说明不是 UTF-8：按中文常见编码依次试
+  for (const enc of ['gb18030', 'gbk', 'big5']) {
+    try {
+      const alt = new TextDecoder(enc).decode(buf);
+      const altBad = (alt.match(/\uFFFD/g) || []).length;
+      if (altBad < bad) return alt;
+    } catch { /* 该编码不可用 */ }
+  }
+  return utf8;
+}
+
 async function extractText(filePath) {
   const ext = path.extname(filePath).toLowerCase();
 
   if (TEXT_EXTS.has(ext)) {
-    return fs.readFileSync(filePath, 'utf8');
+    return decodeTextBuffer(fs.readFileSync(filePath));
   }
 
   if (ext === '.pdf') {
@@ -678,8 +910,16 @@ async function extractText(filePath) {
     return r.value || '';
   }
 
+  if (ext === '.epub') {
+    return epubExtract(filePath);
+  }
+
   if (ext === '.doc') {
     throw new Error('不支持旧版 .doc，请另存为 .docx');
+  }
+
+  if (ext === '.mobi' || ext === '.azw3' || ext === '.azw') {
+    throw new Error('暂不支持 ' + ext + '，请先用 Calibre 转成 .epub 或导出 .txt');
   }
 
   throw new Error('不支持的文件类型：' + (ext || '无扩展名'));
@@ -848,10 +1088,16 @@ async function kbEnsureCache(entry) {
   if (fs.existsSync(cp)) return fs.readFileSync(cp, 'utf8');
 
   let text = '';
+  // 大文件给更多时间：60 秒 + 每兆 1 秒，上限 10 分钟
+  let timeout = PARSE_TIMEOUT_MS;
+  try {
+    const st = fs.statSync(entry.path);
+    timeout = Math.min(600000, PARSE_TIMEOUT_MS + Math.floor(st.size / (1024 * 1024)) * 1000);
+  } catch { /* 按默认超时 */ }
   if (entry.kind === 'image') {
-    text = await withTimeout(ocrImage(entry.path), PARSE_TIMEOUT_MS, '图片识别');
+    text = await withTimeout(ocrImage(entry.path), timeout, '图片识别');
   } else {
-    text = await withTimeout(extractText(entry.path), PARSE_TIMEOUT_MS, '文档');
+    text = await withTimeout(extractText(entry.path), timeout, '文档');
   }
   fs.mkdirSync(KB_CACHE_DIR, { recursive: true });
   fs.writeFileSync(cp, text, 'utf8');
@@ -942,7 +1188,7 @@ ipcMain.handle('kb:pick', async () => {
     title: '添加知识库文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '文档', extensions: ['pdf', 'docx', 'txt', 'md', 'markdown'] },
+      { name: '文档', extensions: ['pdf', 'docx', 'txt', 'md', 'markdown', 'epub'] },
       { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
       { name: '代码/文本', extensions: ['json', 'csv', 'py', 'js', 'ts', 'java', 'c', 'cpp', 'go', 'rs', 'sql', 'html', 'css', 'yml', 'yaml', 'xml', 'log'] },
       { name: '全部文件', extensions: ['*'] },
@@ -1012,7 +1258,7 @@ function scanFolder(root) {
     'vendor', 'third_party', 'vendor.js', 'assets', 'kb-cache', 'sessions',
     'backup', 'test', 'tests', '__tests__', 'tools',
   ]);
-  const LIMIT = { files: 800, depth: 8, sizeBytes: 20 * 1024 * 1024 };
+  const LIMIT = { files: 800, depth: 8, sizeBytes: 100 * 1024 * 1024 };
 
   const out = [];
   const images = [];
@@ -1053,7 +1299,7 @@ function scanFolder(root) {
       if (!ent.isFile()) continue;
 
       const ext = path.extname(name).toLowerCase();
-      const isDoc = TEXT_EXTS.has(ext) || ext === '.pdf' || ext === '.docx';
+      const isDoc = TEXT_EXTS.has(ext) || ext === '.pdf' || ext === '.docx' || ext === '.epub';
       const isImage = IMAGE_EXTS.has(ext);
       if (!isDoc && !isImage) continue;
       // 图片单独限流：一次最多 40 张，避免误选图片素材目录

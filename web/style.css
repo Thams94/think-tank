@@ -649,6 +649,7 @@ button:disabled, input:disabled, select:disabled { opacity: .45; cursor: not-all
 
 /* ---------- @ 点名自动补全 ---------- */
 .composer { position: relative; }
+.mention-menu[hidden] { display: none !important; }
 .mention-menu {
   position: absolute; left: 14px; right: 14px; bottom: calc(100% - 6px);
   max-height: 260px; overflow-y: auto; z-index: 40;
@@ -674,3 +675,81 @@ button:disabled, input:disabled, select:disabled { opacity: .45; cursor: not-all
 /* 议题卡头部：状态与判定一行，标题独占一行，避免窄栏里挤成竖排 */
 .issue .issue-head { flex-wrap: wrap; row-gap: 4px; }
 .issue .issue-head .name { flex: 1 1 100%; order: 5; white-space: normal; }
+
+/* ---------- 策划弹窗：统一滚动区，内部不再各自滚动 ---------- */
+.modal-box.scroll-body {
+  overflow: hidden;                 /* 只让 modal-body 滚动 */
+  max-height: 88vh;
+}
+.modal-box.scroll-body .modal-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 12px;
+  padding-right: 6px; margin-right: -6px;   /* 滚动条不压内容 */
+}
+.modal-box.scroll-body .modal-actions {
+  flex: none; padding-top: 12px; border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+/* 三个板块按内容自然展开 */
+#planRequirement.auto-grow,
+#planFeedback.auto-grow {
+  resize: vertical; overflow: hidden;
+}
+#planFeedback.auto-grow { min-height: 56px; }
+.plan-draft {
+  max-height: none; overflow: visible;   /* 不再单独滚 */
+}
+
+/* 策划弹窗里的小控件对齐修正 */
+.modal-box .inline-toggle {
+  flex-direction: row; align-items: center; justify-content: flex-start;
+  gap: 8px; color: var(--muted); font-size: 12.5px;
+}
+.modal-box .inline-toggle input[type="checkbox"] { flex: none; margin: 0; }
+#btnRefreshRanking { flex: none; width: auto; }
+#rankingStatus { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 栏目标题：不再因为挤压而显示省略号，按钮放不下时换行 */
+.section-title.members-head { flex-wrap: wrap; row-gap: 4px; }
+.section-title.members-head .head-label {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+/* 换行后收起按钮仍靠右 */
+.section-title.members-head .collapse { margin-left: auto; }
+
+/* 栏目标题一行放得下：收紧间距与按钮内边距 */
+.section-title.members-head { gap: 6px; padding: 4px 2px; }
+.section-title.members-head .mini { padding: 3px 7px; font-size: 11.5px; }
+.section-title.members-head .collapse { margin-left: auto; padding: 2px 4px; }
+
+/* 议题栏标题更紧凑，保证「策划组队 / + 添加 / 收起」在同一行 */
+.issues-panel .section-title.members-head { gap: 4px; }
+.issues-panel .section-title.members-head .mini { padding: 3px 5px; }
+.issues-panel .section-title.members-head .pill { padding: 0 5px; }
+
+/* ---------- 策划阶段：向用户要补充 ---------- */
+.plan-ask { border: 1px solid rgba(91,141,239,.4); background: rgba(91,141,239,.06); border-radius: 8px; padding: 10px; }
+.plan-q { margin-bottom: 8px; }
+.plan-q .q-text { font-size: 12.5px; color: var(--text); margin-bottom: 4px; line-height: 1.5; }
+.plan-q .q-text .muted { font-size: 11px; margin-left: 4px; }
+.plan-q .plan-answer { width: 100%; box-sizing: border-box; resize: vertical; min-height: 44px; }
+
+/* ---------- 议题卡「需补充」操作行 ---------- */
+.issue-supplement {
+  display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px;
+  padding-top: 8px; border-top: 1px dashed rgba(91,141,239,.35);
+}
+.issue-supplement .mini { border-color: rgba(91,141,239,.45); }
+#supplementText { width: 100%; box-sizing: border-box; resize: vertical; min-height: 120px; }
+
+/* ---------- 主持人总结消息 ---------- */
+.msg.summary .bubble {
+  border: 1px solid rgba(91,141,239,.55);
+  background: rgba(91,141,239,.10);
+  box-shadow: inset 3px 0 0 rgba(91,141,239,.7);
+}

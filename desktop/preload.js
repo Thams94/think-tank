@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // 联网搜索
   webSearch: (payload) => ipcRenderer.invoke('websearch:run', payload),
+  rankingFetch: () => ipcRenderer.invoke('ranking:fetch'),
+  rankingCache: () => ipcRenderer.invoke('ranking:cache'),
 
   // 知识库
   // 系统交互
