@@ -2254,9 +2254,15 @@ async function runPlanner(feedback) {
     }
   }
 
-  const sup = state.draftPlan.supplements || [];
-  if (sup.length) {
-    userParts.unshift('【用户的补充说明（策划阶段已回答）】\n' + sup.map((x, i) => `Q${i + 1}：${x.q}\nA${i + 1}：${x.a}`).join('\n\n'));
+  const supAll = state.draftPlan.supplements || [];
+  if (supAll.length) {
+    // 只带最近 20 条，单条答案截断，避免补充越多请求越大、模型越慢
+    const sup = supAll.slice(-20);
+    const omitted = supAll.length - sup.length;
+    const body = sup.map((x) => `Q：${String(x.q).slice(0, 200)}\nA：${String(x.a).slice(0, 600)}`).join('\n\n');
+    userParts.unshift('【用户的补充说明（策划阶段已回答）】\n'
+      + (omitted > 0 ? `（前面还有 ${omitted} 条较早的补充，已省略）\n\n` : '')
+      + body);
   }
 
   for (const fb of state.draftPlan.feedback) userParts.push('【上一版方案的修改意见】' + fb);
@@ -2370,7 +2376,10 @@ function renderPlanDraft() {
           <div class="q-text">${i + 1}. ${escapeHtml(q.q)}${q.why ? `<span class="muted">（${escapeHtml(q.why)}）</span>` : ''}</div>
           <textarea class="plan-answer" data-i="${i}" rows="2" placeholder="你的回答…"></textarea>
         </div>`).join('')}
-      <div class="row"><button class="primary" id="btnSubmitSupplements">提交补充并重新生成</button></div>
+      <div class="row">
+        <button class="primary" id="btnSubmitSupplements">提交补充并重新生成</button>
+        <button class="ghost" id="btnSaveSuppOnly" title="只把回答存下来，不调用模型重新生成">仅保存补充</button>
+      </div>
     </div>` : '';
   const expanded = state.draftPlan.supExpanded === true;
   const shown = expanded ? sup : sup.slice(-3);
@@ -2411,6 +2420,27 @@ function updatePlanActions() {
 }
 
 /** 收集策划阶段的补充回答，带回去重新生成方案 */
+/** 只把填写的补充存下来，不调用模型（模型不稳定时的兜底） */
+function saveSupplementsOnly() {
+  const qs = state.draftPlan.questions || [];
+  const answers = [];
+  document.querySelectorAll('#planDraft .plan-answer').forEach((el) => {
+    const i = Number(el.dataset.i);
+    const a = String(el.value || '').trim();
+    if (a) answers.push({ q: (qs[i] && qs[i].q) || `问题${i + 1}`, a, i });
+  });
+  if (!answers.length) {
+    if ($('#planStatus')) $('#planStatus').textContent = '还没有填写任何补充内容';
+    return;
+  }
+  state.draftPlan.supplements = (state.draftPlan.supplements || []).concat(answers);
+  state.draftPlan.questions = [];
+  renderPlanDraft();
+  if ($('#planStatus')) {
+    $('#planStatus').textContent = `已保存 ${answers.length} 条补充（共 ${state.draftPlan.supplements.length} 条）。下次生成方案会自动带上。`;
+  }
+}
+
 async function submitSupplements() {
   const qs = state.draftPlan.questions || [];
   const answers = [];
@@ -2436,9 +2466,11 @@ async function submitSupplements() {
     ok = await runPlanner(null);
   } finally {
     if (!ok) {
-      // 失败：撤销这次补充，恢复问题与已填答案，按钮恢复可点
-      state.draftPlan.supplements = (state.draftPlan.supplements || []).slice(0, prevCount);
+      // 失败也要把补充收下（用户的回答不能白填），问题保留方便重试
       state.draftPlan.questions = qs;
+      if ($('#planStatus')) {
+        $('#planStatus').textContent = `这次重新生成没成功，但你的 ${answers.length} 条补充已保存（共 ${state.draftPlan.supplements.length} 条）。可以再点一次重试。`;
+      }
       renderPlanDraft();
       document.querySelectorAll('#planDraft .plan-answer').forEach((el) => {
         const i = Number(el.dataset.i);
@@ -2448,6 +2480,10 @@ async function submitSupplements() {
     }
     const b2 = $('#btnSubmitSupplements');
     if (b2) { b2.disabled = false; b2.textContent = '提交补充并重新生成'; }
+    if (!ok && !state.draftPlan.questions.length) {
+      // 极端情况：问题没了但也没成功，至少把按钮恢复并提示
+      if ($('#planStatus')) $('#planStatus').textContent = '重新生成未成功，补充已保存，可再点一次。';
+    }
   }
 }
 
@@ -3338,6 +3374,7 @@ function bindEvents() {
   if ($('#planDraft')) {
     $('#planDraft').addEventListener('click', (e) => {
       if (e.target && e.target.id === 'btnSubmitSupplements') submitSupplements();
+      if (e.target && e.target.id === 'btnSaveSuppOnly') saveSupplementsOnly();
       if (e.target && e.target.id === 'btnToggleSup') {
         state.draftPlan.supExpanded = !(state.draftPlan.supExpanded === true);
         renderPlanDraft();
