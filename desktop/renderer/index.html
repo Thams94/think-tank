@@ -114,6 +114,10 @@
       <label>代理（留空 = 使用系统代理）
         <input id="proxy" placeholder="http://127.0.0.1:10808" />
       </label>
+      <label class="inline-toggle" title="长回复反复出现 HTTP2_PROTOCOL_ERROR 时打开；修改后需重启应用">
+        <input type="checkbox" id="disableHttp2" />
+        禁用 HTTP/2（兼容模式，改完需重启应用）
+      </label>
       <label>安全上限（不限轮数时，最多连续发言多少次；到上限会提示「继续」）
         <input id="safetyCap" type="number" step="10" min="1" value="200" />
       </label>

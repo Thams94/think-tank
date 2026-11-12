@@ -859,7 +859,7 @@ const TASK_LABELS = {
     reset: '重置为待讨论',
     manualNote: '（手动标记为已讨论）',
     status: { todo: '待讨论', active: '讨论中', done: '已讨论', skipped: '已跳过' },
-    verdicts: ['需修改', '可接受', '待定', '需补充'],
+    verdicts: ['有结论', '倾向明确', '有分歧', '需补充'],
   },
 };
 
@@ -874,10 +874,12 @@ function labels() {
 
 /** 判定词 → 徽章配色 */
 const VERDICT_CLASS = {
-  '不通过': 'fail', '需修改': 'fail',
-  '通过': 'pass', '可接受': 'pass',
-  '高风险': 'risk', '待定': 'risk',
-  '需实测': 'test', '需补充': 'test',
+  // 审核
+  '不通过': 'fail', '通过': 'pass', '高风险': 'risk', '需实测': 'test',
+  // 讨论
+  '有结论': 'pass', '倾向明确': 'risk', '有分歧': 'fail', '需补充': 'test',
+  // 旧数据兼容（早期讨论用的审核式判定）
+  '需修改': 'fail', '可接受': 'pass', '待定': 'risk',
 };
 
 /** 按任务类型返回判定规则（讨论任务不再出现代码审计术语） */
@@ -889,7 +891,7 @@ function taskRules() {
       '2. 区分三类内容并分别标注：「材料事实」「我的判断」「不确定」。不确定的写「待补充」，不要编。',
       '3. 材料没提到的，写「材料未涉及」，不能补全、不能假设。',
       '4. 每张卡要落到可执行的结论：具体怎么做 / 改成什么 / 找谁确认，不要停在泛泛而谈。',
-      '5. 每张卡的判定只能是：' + labels().verdicts.join(' / ') + ' 之一，并写一句理由。',
+      '5. 每张卡的判定只能是：' + labels().verdicts.join(' / ') + ' 之一，并写一句理由。含义：有结论=可以定下来；倾向明确=大方向清楚但细节待定；有分歧=各方意见不统一；需补充=材料不够还没法判断。',
       '6. 出现分歧时，列出分歧点与各自依据，不要强行统一，也不要隐藏分歧。',
       '7. 这是开放性讨论，不要套用代码审计/漏洞审查的术语与判定方式，用日常讨论的表达；除非材料本身就是代码。',
       '7b. 不要向用户提问、不要把问题留到中途等用户回答。用户的需求和补充已经在材料里；确实缺信息时，就在结论里写「需补充：……」，并给出在现有信息下能确定的部分。',
@@ -1089,6 +1091,12 @@ function humanizeError(raw) {
       + '\n- 检查「设置 → 代理」是否填对（不填则走系统代理）'
       + '\n- 换一条线路或稍后重试'
       + '\n- 如果每次都超时，把该成员的供应商换成另一个';
+  }
+  if (/ERR_HTTP2_PROTOCOL_ERROR|HTTP2_PROTOCOL/i.test(t)) {
+    return t + '\n\n【提示】这是 HTTP/2 连接被中断（常见于长回复或中转站不稳定），已自动重试过一次。'
+      + '\n- 直接点「继续生成」通常能接上'
+      + '\n- 反复出现的话：设置里勾选「禁用 HTTP/2（兼容模式）」后重启应用'
+      + '\n- 或换一条线路 / 换供应商';
   }
   if (/HTTP 5\d\d|EOF|connection reset|ECONNRESET/i.test(t)) {
     return t + '\n\n【提示】上游连接异常（供应商或网络不稳定），可以直接重试；连续失败建议更换模型。';
@@ -2364,10 +2372,16 @@ function renderPlanDraft() {
         </div>`).join('')}
       <div class="row"><button class="primary" id="btnSubmitSupplements">提交补充并重新生成</button></div>
     </div>` : '';
+  const expanded = state.draftPlan.supExpanded === true;
+  const shown = expanded ? sup : sup.slice(-3);
   const supHtml = sup.length ? `
     <div class="plan-sec">
-      <div class="plan-sec-h">你的补充（${sup.length} 条）</div>
-      ${sup.map((x, i) => `<div class="muted">Q${i + 1}：${escapeHtml(x.q)}<br>　A：${escapeHtml(x.a)}</div>`).join('')}
+      <div class="plan-sec-h">你的补充（共 ${sup.length} 条${expanded ? '' : '，只显示最近 3 条'}）</div>
+      ${shown.map((x) => {
+        const i = sup.indexOf(x);
+        return `<div class="muted">Q${i + 1}：${escapeHtml(x.q)}<br>　A：${escapeHtml(x.a)}</div>`;
+      }).join('')}
+      ${sup.length > 3 ? `<button class="mini" id="btnToggleSup">${expanded ? '收起' : `展开全部（${sup.length} 条）`}</button>` : ''}
     </div>` : '';
 
   box.innerHTML = `
@@ -2375,6 +2389,12 @@ function renderPlanDraft() {
     <div class="plan-sec"><div class="plan-sec-h">议题卡（${issues.length} 张）</div>${issueHtml}</div>
     ${supHtml}
     ${qHtml}`;
+
+  // 有问题要回答时，把它滚进视野（补充多了也不至于找不到）
+  if (qs.length) {
+    const ask = box.querySelector('.plan-ask');
+    if (ask) requestAnimationFrame(() => { try { ask.scrollIntoView({ block: 'nearest' }); } catch { /* 忽略 */ } });
+  }
   updatePlanActions();
 }
 
@@ -3318,6 +3338,10 @@ function bindEvents() {
   if ($('#planDraft')) {
     $('#planDraft').addEventListener('click', (e) => {
       if (e.target && e.target.id === 'btnSubmitSupplements') submitSupplements();
+      if (e.target && e.target.id === 'btnToggleSup') {
+        state.draftPlan.supExpanded = !(state.draftPlan.supExpanded === true);
+        renderPlanDraft();
+      }
     });
   }
 
@@ -3450,6 +3474,7 @@ function bindEvents() {
     state.proxy = $('#proxy').value.trim();
     const capInput = Number($('#safetyCap').value);
     state.settings.safetyCap = Number.isFinite(capInput) && capInput > 0 ? Math.round(capInput) : DEFAULT_SAFETY_CAP;
+    if ($('#disableHttp2')) state.settings.disableHttp2 = $('#disableHttp2').checked === true;
     state.settings.plannerProviderId = $('#plannerProvider').value || null;
     state.settings.plannerModel = $('#plannerModel').value || null;
     state.kbCache.clear();
@@ -3779,6 +3804,7 @@ function openSettings() {
   $('#modalMember').hidden = true;
   $('#proxy').value = state.proxy || '';
   $('#safetyCap').value = safetyCap();
+  if ($('#disableHttp2')) $('#disableHttp2').checked = state.settings.disableHttp2 === true;
   renderProviders();
   renderPlannerSelect();
   syncBatchChecks();

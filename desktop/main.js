@@ -25,6 +25,14 @@ if (DATA_DIR_OVERRIDE) {
   app.setPath('userData', APP_DATA_DIR);
 }
 
+// 兼容模式：长回复反复出现 HTTP2_PROTOCOL_ERROR 时，可在设置里禁用 HTTP/2
+try {
+  const earlyCfg = loadConfig();
+  if (earlyCfg && earlyCfg.settings && earlyCfg.settings.disableHttp2) {
+    app.commandLine.appendSwitch('disable-http2');
+  }
+} catch { /* 配置读取失败就按默认 */ }
+
 const USER_DIR = app.getPath('userData');
 const CONFIG_FILE = path.join(USER_DIR, 'config.json');
 const CHAT_FILE = path.join(USER_DIR, 'chats.json');       // 旧版单会话文件（迁移用）
@@ -282,22 +290,51 @@ async function streamChat({ baseUrl, apiKey, model, messages, temperature, signa
     else signal.addEventListener('abort', onUserAbort, { once: true });
   }
 
-  let res;
+  let res = null;
+  let lastErr = null;
   try {
-    res = await httpFetch(`${base}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'text/event-stream',
-      },
-      body: JSON.stringify(body),
-      signal: connectCtrl.signal,
-    });
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (attempt > 1) {
+        // 换一条连接重试：HTTP/2 断流时新连接常会协商到可用的链路
+        await new Promise((r) => setTimeout(r, 700));
+      }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => {
+        try { ctrl.abort(new Error('ERR_TIMED_OUT')); } catch { /* 忽略 */ }
+      }, 90000);
+      const onAbort = () => { try { ctrl.abort(); } catch { /* 忽略 */ } };
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
+      try {
+        res = await httpFetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify(body),
+          signal: ctrl.signal,
+        });
+        break;
+      } catch (e) {
+        lastErr = e;
+        const msg = String((e && e.message) || e || '');
+        if (signal && signal.aborted) throw e;
+        if (attempt < 2 && (isNetError(e) || /HTTP2|aborted|ERR_/i.test(msg))) continue;
+        throw e;
+      } finally {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+      }
+    }
   } finally {
     clearTimeout(connectTimer);
     if (signal) signal.removeEventListener('abort', onUserAbort);
   }
+  if (!res && lastErr) throw lastErr;
 
   if (!res.ok) {
     let text = await res.text();
