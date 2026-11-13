@@ -751,7 +751,9 @@ function messageNode(m) {
   if (m.role === 'assistant' && (m.truncated || m.interrupted)) {
     acts = '<button class="act go" data-act="cont">继续生成</button>' + acts;
   }
-  const actsHtml = `<span class="acts">${acts}<button class="act" data-act="cut">删除以下</button></span>`;
+  const needFix = m.role === 'assistant' && !!m.error && /model_not_found|无可用渠道|insufficient|quota|HTTP 40[13]/i.test(m.error);
+  const fixBtn = needFix && m.memberId ? '<button class="act go" data-act="fixmodel">换模型</button>' : '';
+  const actsHtml = `<span class="acts">${acts}${fixBtn}<button class="act" data-act="cut">删除以下</button></span>`;
 
   wrap.innerHTML = `
     <div class="avatar" style="background:${escapeHtml(color)}">${escapeHtml(m.role === 'user' ? '我' : initials(name))}</div>
@@ -1098,6 +1100,14 @@ function humanizeError(raw) {
       + '\n- 反复出现的话：设置里勾选「禁用 HTTP/2（兼容模式）」后重启应用'
       + '\n- 或换一条线路 / 换供应商';
   }
+  if (/model_not_found|无可用渠道|distributor|model not found/i.test(t)) {
+    return t + '\n\n【提示】这个模型在当前供应商的「分组」里没有开通渠道（不是软件问题）。'
+      + '\n- 点成员 → 把模型换成该供应商真正可用的（例如同一个中转里的其他模型）'
+      + '\n- 或到中转后台把该模型加到当前令牌所在分组';
+  }
+  if (/insufficient credits|insufficient_quota|余额不足|欠费|quota exceeded/i.test(t)) {
+    return t + '\n\n【提示】账号余额或额度不足，请充值，或换成别的供应商/模型。';
+  }
   if (/HTTP 5\d\d|EOF|connection reset|ECONNRESET/i.test(t)) {
     return t + '\n\n【提示】上游连接异常（供应商或网络不稳定），可以直接重试；连续失败建议更换模型。';
   }
@@ -1389,6 +1399,10 @@ async function copyWholeChat(btn) {
 }
 
 function onMessageAction(m, act) {
+  if (act === 'fixmodel') {
+    if (m.memberId) openMemberModal(m.memberId);
+    return;
+  }
   if (act === 'copy') {
     const body = m.text || '';
     copyText(body).then((ok) => pushSystem(ok ? '已复制这条消息' : '复制失败，请手动选中复制'));
@@ -1769,6 +1783,15 @@ async function runModerated(rounds, enabled) {
       '请阅读群聊记录，决定下一个发言者，并给 TA 一句提示。',
       `如果你认为讨论已经充分、可以收尾了，就输出 {"done":true,"verdict":"${labels().verdicts[0]}","conclusion":"本议题的最终结论"} 来结束讨论。`,
       `verdict 必须是 ${labels().verdicts.join(' / ')} 之一。结论要具体、可执行，并带依据。`,
+      taskType() === 'discuss'
+        ? [
+            '结论（conclusion）必须按你选的判定写成对应结构，不要只写一句“基本一致”：',
+            '· 有结论 → 一句话给出结论 + 一句依据即可，不需要展开。',
+            '· 倾向明确 → 先写结论，再另起「还待定的细节：」并逐条列出（第 1、2、3…），每条写清差在哪、需要什么才能定。',
+            '· 有分歧 → 先写分歧焦点，再另起「各方观点：」逐条写「成员名：观点 + 理由」，不要合并成“有人觉得”。',
+            '· 需补充 → 先写目前能确定的部分，再另起「需要补充：」逐条列出具体材料名（书名 / 文件名 / 数据项），一条一行。',
+          ].join('\n')
+        : '',
       '如果继续讨论必须由用户补充材料/做选择（缺书目、缺需求、缺参数等），输出 {"askUser":"要问用户的话"}，把问题写具体，不要自己编材料。',
       '只输出一行 JSON，不要解释：{"next":"成员名","prompt":"提示"} 或 {"done":true,"verdict":"…","conclusion":"结论"} 或 {"askUser":"问题"}',
     ].filter(Boolean).join('\n');
@@ -2256,13 +2279,22 @@ async function runPlanner(feedback) {
 
   const supAll = state.draftPlan.supplements || [];
   if (supAll.length) {
-    // 只带最近 20 条，单条答案截断，避免补充越多请求越大、模型越慢
-    const sup = supAll.slice(-20);
-    const omitted = supAll.length - sup.length;
-    const body = sup.map((x) => `Q：${String(x.q).slice(0, 200)}\nA：${String(x.a).slice(0, 600)}`).join('\n\n');
+    // 按「字数预算」带补充，而不是按条数：1M 上下文下能带多少带多少，
+    // 只有确实超预算才从最早的开始略去（并明确标注略了几条）。
+    const SUP_BUDGET = 40000;          // 约 1.3–2 万 tokens，相对 1M 上下文很保守
+    const one = (x) => `Q：${String(x.q).slice(0, 300)}\nA：${String(x.a).slice(0, 1500)}`;
+    let used = 0;
+    const kept = [];
+    for (let i = supAll.length - 1; i >= 0; i--) {
+      const seg = one(supAll[i]);
+      if (used + seg.length > SUP_BUDGET && kept.length) break;   // 从最新往前装，装不下就停
+      kept.unshift(seg);
+      used += seg.length;
+    }
+    const omitted = supAll.length - kept.length;
     userParts.unshift('【用户的补充说明（策划阶段已回答）】\n'
-      + (omitted > 0 ? `（前面还有 ${omitted} 条较早的补充，已省略）\n\n` : '')
-      + body);
+      + (omitted > 0 ? `（共 ${supAll.length} 条，最早 ${omitted} 条因超出 ${SUP_BUDGET} 字预算未带入）\n\n` : `（共 ${supAll.length} 条，全部带入）\n\n`)
+      + kept.join('\n\n'));
   }
 
   for (const fb of state.draftPlan.feedback) userParts.push('【上一版方案的修改意见】' + fb);
@@ -2843,24 +2875,41 @@ async function maybeFinalSummary() {
   pushSystem('━━ 全部议题已结束，主持人正在总结 ━━');
 
   const list = state.issues.map((it, i) => {
-    // 「需补充」的卡结论里通常列着具体资料名，放宽截断避免被切掉
-    const cut = it.verdict === '需补充' ? 1500 : 500;
-    return `${i + 1}. ${it.title}｜判定：${it.verdict || '未判定'}｜结论：${(it.conclusion || '（无）').slice(0, cut)}`;
-  }).join('\n');
+    // 非「有结论」的卡需要更多原文细节（待定项 / 各方观点 / 材料名）
+    const cut = it.verdict === '有结论' ? 400 : 2000;
+    return `${i + 1}. ${it.title}｜判定：${it.verdict || '未判定'}\n结论：${(it.conclusion || '（无）').slice(0, cut)}`;
+  }).join('\n\n');
 
   const instruction = [
-    '全部议题已经讨论完毕。请给用户做一段**通俗易懂**的最终汇报，不要用行话，不要复述讨论过程。',
+    '全部议题已经讨论完毕。请用**通俗易懂**的中文逐条汇报，不要用行话，不要复述讨论过程。',
     '',
-    '必须按这三段写，用简短的小标题：',
-    '**结论**：如果已经有明确答案，直接说出来（例如「选《X》」「方案 A 更合适」）。'
-      + '如果所有议题都是「需补充」，就明确写「目前还没有结论」，并一句话说明卡在哪一步。',
-    '**还需要你补充**：这是最容易写含糊的一段，必须遵守：',
-    '  - 只要有一张卡判定是「需补充」，就把那张卡结论里点名的资料**原样搬过来**，写清书名 / 文件名 / 具体数据；',
-    '  - 不允许概括成「一些资料」「更多信息」「相关资料」这类模糊说法；',
-    '  - 每条一行，用「- 」开头；一张卡都不缺就写「不需要」。',
-    '**接下来怎么做**：给用户 1–3 条能直接动手的下一步；如果是等补充，就写补充完先做什么。',
+    '**按判定分别处理，格式必须照下面来：**',
+    '· 「有结论」→ 一行写完：`- 议题名：一句话结论`，不需要展开。',
+    '· 「倾向明确」→ 先写一句结论，然后另起「还待定的细节：」逐条列出细节，每条说明差在哪、需要什么才能定。',
+    '· 「有分歧」→ 先写分歧焦点，然后另起「各方观点：」逐条写「成员名：观点 + 理由」。'
+      + '**必须写出是谁的什么观点**，不允许合并成「有人认为」「双方存在分歧」这种空话。',
+    '· 「需补充」→ 先写目前能确定的部分，然后另起「需要补充：」逐条列出具体材料名'
+      + '（书名 / 文件名 / 数据项），**原样搬用结论里点名的资料**，不允许写「一些资料」「更多信息」。',
     '',
-    '议题与判定：',
+    '最后再写两段：',
+    '**总体结论**：一句话概括现在能不能定下来；全部都是「需补充」就写「目前还没有结论」，并说明卡在哪。',
+    '**下一步**：1–3 条能直接动手的事；如果是等补充，就写补充完之后先做什么。',
+    '',
+    '格式示例：',
+    '```',
+    '- 《选哪本 Python 书》：有结论 → 选《Python 编程：从入门到实践（第 3 版）》。',
+    '- 是否要配练习册：倾向明确 → 倾向配一本，但还待定的细节：',
+    '  1. 练习册版本要与主教材对齐，需先确认是第 3 版还是第 4 版；',
+    '  2. 每天可投入时间未定，决定练习量。',
+    '- 要不要先学 Scratch：有分歧 → 焦点是先图形化还是直接上文本。各方观点：',
+    '  · 入门教学顾问：先 Scratch，理由是降低挫败感；',
+    '  · 学习规划主持人：直接上 Python，理由是时间成本更低。',
+    '- 孩子当前基础：需补充 → 目前只能确定「零基础」是家长自述。需要补充：',
+    '  · 《Python 编程：从入门到实践（第 3 版）》的目录',
+    '  · 孩子最近一次数学考试成绩',
+    '```',
+    '',
+    '议题与判定（请按上面的格式逐条改写，不要照抄结论原文）：',
     list,
   ].join('\n');
 

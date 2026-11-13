@@ -1,6 +1,6 @@
 {
   "name": "think-tank",
-  "version": "0.8.0",
+  "version": "0.8.3",
   "description": "智库：多模型审核工作台，自动组建审核团队并按议题逐项推进",
   "main": "main.js",
   "author": "local",
