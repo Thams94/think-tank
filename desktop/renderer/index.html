@@ -129,6 +129,12 @@
               <button class="ghost" id="btnProbeModels" title="逐个模型发一次最小请求，检测是否支持文本 / 视觉">🧪 测试模型能力</button>
             </div>
             <p class="muted" style="margin:6px 0 0">模型名后面会标「文本 / 视觉」，是点上面按钮实测出来的。</p>
+
+            <div class="model-list-head">
+              <span class="model-list-title">模型列表 <span class="pill" id="modelCount">0</span></span>
+              <input id="modelFilter" class="model-filter" placeholder="搜索模型名 / 供应商…" />
+            </div>
+            <div class="model-list" id="modelList"></div>
           </section>
 
           <!-- 策划与成员 -->

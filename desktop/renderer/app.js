@@ -2750,6 +2750,39 @@ function updatePlanKbHint() {
   el.textContent = s;
 }
 
+/** 设置里的模型列表：列出所有供应商的模型 + 能力标签 */
+function renderModelList() {
+  const box = $('#modelList');
+  if (!box) return;
+  const kw = String(($('#modelFilter') && $('#modelFilter').value) || '').trim().toLowerCase();
+
+  const rows = [];
+  for (const p of state.providers) {
+    for (const m of (p.models || [])) {
+      if (kw && !(`${m} ${p.name}`.toLowerCase().includes(kw))) continue;
+      const c = capsOf(p.id, m);
+      let tags = '';
+      if (!c) {
+        tags = '<span class="model-tag unknown">未测试</span>';
+      } else if (!c.text) {
+        tags = '<span class="model-tag dead">不可用</span>';
+      } else {
+        tags = '<span class="model-tag text">文本</span>'
+          + (c.vision ? '<span class="model-tag vision">视觉</span>' : '');
+      }
+      rows.push(`<div class="model-row" title="${escapeHtml(p.name)} · ${escapeHtml(m)}">
+        <span class="mname">${escapeHtml(m)}</span>
+        <span class="mprov">${escapeHtml(p.name)}</span>
+        ${tags}
+      </div>`);
+    }
+  }
+
+  if ($('#modelCount')) $('#modelCount').textContent = String(rows.length);
+  box.innerHTML = rows.length ? rows.join('')
+    : `<div class="model-empty">${state.providers.length ? '没有匹配的模型' : '还没有供应商，先点上面「+ 添加供应商」'}</div>`;
+}
+
 function renderPlannerSelect() {
   const pp = $('#plannerProvider');
   const pm = $('#plannerModel');
@@ -2767,7 +2800,10 @@ function renderPlannerSelect() {
     const cur = state.settings.plannerModel;
     if (cur && !models.includes(cur)) models.unshift(cur);
     pm.innerHTML = models.length
-      ? models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')
+      ? models.map((m) => {
+          const tag = capsLabel(pp.value, m);
+          return `<option value="${escapeHtml(m)}">${escapeHtml(m)}${tag ? ' — ' + escapeHtml(tag) : ''}</option>`;
+        }).join('')
       : '<option value="">（先拉取模型）</option>';
     pm.value = cur && models.includes(cur) ? cur : (models[0] || '');
   };
@@ -3140,6 +3176,7 @@ async function runIssueQueue(enabled, rounds) {
 /* ---------------- 供应商编辑 ---------------- */
 
 function renderProviders() {
+  setTimeout(() => { try { renderModelList(); } catch { /* 忽略 */ } }, 0);
   const box = $('#providerList');
   box.innerHTML = '';
 
@@ -3717,6 +3754,7 @@ function bindEvents() {
   $('#btnFetchAllModels').onclick = fetchAllModels;
   if ($('#btnProbeModels')) $('#btnProbeModels').onclick = () => probeModelCaps({ force: true });
 
+  if ($('#modelFilter')) $('#modelFilter').oninput = () => renderModelList();
   $('#btnAddKb').onclick = async () => {
     const paths = await bridge.kbPick();
     await ensureWindowFocus();
