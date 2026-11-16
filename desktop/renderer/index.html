@@ -111,46 +111,74 @@
       <h2>供应商 / 连接设置</h2>
       <p class="muted">可以添加多个供应商（不同 URL + Key），每个成员选用其中一个。</p>
 
-      <div id="providerList" class="providers"></div>
-      <button class="ghost add-provider" id="btnAddProvider">+ 添加供应商</button>
-      <button class="ghost" id="btnFetchAllModels" style="margin-top:6px">🔄 一键拉取全部模型</button>
-      <button class="ghost" id="btnProbeModels" style="margin-top:6px" title="逐个模型发一次最小请求，检测是否支持文本 / 视觉">🧪 测试模型能力（文本 / 视觉）</button>
+      <div class="settings-layout">
+        <nav class="settings-nav" id="settingsNav">
+          <button class="snav active" data-page="providers">供应商与模型</button>
+          <button class="snav" data-page="planner">策划与成员</button>
+          <button class="snav" data-page="network">网络与性能</button>
+          <button class="snav" data-page="about">关于</button>
+        </nav>
 
-      <label>代理（留空 = 使用系统代理）
-        <input id="proxy" placeholder="http://127.0.0.1:10808" />
-      </label>
-      <label class="inline-toggle" title="长回复反复出现 HTTP2_PROTOCOL_ERROR 时打开；修改后需重启应用">
-        <input type="checkbox" id="disableHttp2" />
-        禁用 HTTP/2（兼容模式，改完需重启应用）
-      </label>
-      <label>安全上限（不限轮数时，最多连续发言多少次；到上限会提示「继续」）
-        <input id="safetyCap" type="number" step="10" min="1" value="200" />
-      </label>
+        <div class="settings-pages">
+          <!-- 供应商与模型 -->
+          <section class="settings-page" data-page="providers">
+            <button class="ghost add-provider" id="btnAddProvider">+ 添加供应商</button>
+            <div id="providerList" class="providers"></div>
+            <div class="row" style="gap:8px;margin-top:6px">
+              <button class="ghost" id="btnFetchAllModels">🔄 一键拉取全部模型</button>
+              <button class="ghost" id="btnProbeModels" title="逐个模型发一次最小请求，检测是否支持文本 / 视觉">🧪 测试模型能力</button>
+            </div>
+            <p class="muted" style="margin:6px 0 0">模型名后面会标「文本 / 视觉」，是点上面按钮实测出来的。</p>
+          </section>
+
+          <!-- 策划与成员 -->
+          <section class="settings-page" data-page="planner" hidden>
             <label>策划模型（负责组队、生成提示词、拆解议题）
-        <div class="row" style="gap:8px">
-          <label class="pfield" style="flex:1"><span>供应商</span><select id="plannerProvider"></select></label>
-          <label class="pfield" style="flex:1"><span>模型</span><select id="plannerModel"></select></label>
-        </div>
-      </label>
-      <div class="batch-row">
-        <span class="muted">成员批量设置</span>
-        <label class="inline"><input type="checkbox" id="allReasoning" /> 全部高思考</label>
-        <label class="inline"><input type="checkbox" id="allVision" /> 全部看图</label>
-      </div>
-      <div class="about-box">
-        <div class="about-row">
-          <span class="muted">版本</span>
-          <b id="appVersion">—</b>
-          <span class="muted" id="engineVersion"></span>
-        </div>
-        <div class="about-row">
-          <span class="muted">更新地址</span>
-          <a href="#" id="linkUpdate" class="about-link">GitHub Releases</a>
-        </div>
-        <div class="about-row" id="dataDirRow" hidden>
-          <span class="muted">数据目录</span>
-          <code id="dataDirPath" class="about-path">—</code>
-          <button class="ghost small" id="btnOpenDataDir">打开</button>
+              <div class="row" style="gap:8px">
+                <label class="pfield" style="flex:1"><span>供应商</span><select id="plannerProvider"></select></label>
+                <label class="pfield" style="flex:1"><span>模型</span><select id="plannerModel"></select></label>
+              </div>
+            </label>
+            <div class="batch-row">
+              <span class="muted">成员批量设置</span>
+              <label class="inline"><input type="checkbox" id="allReasoning" /> 全部高思考</label>
+              <label class="inline"><input type="checkbox" id="allVision" /> 全部看图</label>
+            </div>
+          </section>
+
+          <!-- 网络与性能 -->
+          <section class="settings-page" data-page="network" hidden>
+            <label>代理（留空 = 使用系统代理）
+              <input id="proxy" placeholder="http://127.0.0.1:10808" />
+            </label>
+            <label class="inline-toggle" title="长回复反复出现 HTTP2_PROTOCOL_ERROR 时打开；修改后需重启应用">
+              <input type="checkbox" id="disableHttp2" />
+              禁用 HTTP/2（兼容模式，改完需重启应用）
+            </label>
+            <label>安全上限（不限轮数时，最多连续发言多少次；到上限会提示「继续」）
+              <input id="safetyCap" type="number" step="10" min="1" value="200" />
+            </label>
+          </section>
+
+          <!-- 关于 -->
+          <section class="settings-page" data-page="about" hidden>
+            <div class="about-box">
+              <div class="about-row">
+                <span class="muted">版本</span>
+                <b id="appVersion">—</b>
+                <span class="muted" id="engineVersion"></span>
+              </div>
+              <div class="about-row">
+                <span class="muted">更新地址</span>
+                <a href="#" id="linkUpdate" class="about-link">GitHub Releases</a>
+              </div>
+              <div class="about-row" id="dataDirRow" hidden>
+                <span class="muted">数据目录</span>
+                <code id="dataDirPath" class="about-path">—</code>
+                <button class="ghost small" id="btnOpenDataDir">打开</button>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
 

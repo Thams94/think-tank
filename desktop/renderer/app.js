@@ -3587,6 +3587,10 @@ function bindEvents() {
     persistConfig();
   };
 
+  // 设置弹窗左侧分类
+  document.querySelectorAll('#settingsNav .snav').forEach((btn) => {
+    btn.onclick = () => switchSettingsPage(btn.dataset.page);
+  });
   $('#btnSettings').onclick = openSettings;
   bindContextMenu();
   $('#btnKb').onclick = openKb;
@@ -3683,13 +3687,18 @@ function bindEvents() {
   if (clearCacheBtn) {
     clearCacheBtn.hidden = typeof bridge.kbClearCache !== 'function';
     clearCacheBtn.onclick = async () => {
-      const ok = await askUser({ title: '清理解析缓存', message: '会删除已解析的资料文本缓存，之后需要重新添加文件才能再检索。', okText: '清理' });
-      if (!ok) return;
+      // 先把知识库弹窗收起来，否则确认框会被它压住
+      const kbModal = $('#modalKb');
+      const wasOpen = kbModal && !kbModal.hidden;
+      if (wasOpen) kbModal.hidden = true;
+      const ok = await askUser({ title: '清理解析缓存', message: '会删除已解析的资料文本缓存，之后需要重新添加文件才能再检索。', danger: true, okText: '清理' });
+      if (!ok) { if (wasOpen) kbModal.hidden = false; return; }
       try {
         const r = await bridge.kbClearCache();
         state.kbCache.clear();
         pushSystem(`已清理 ${r.removed} 个解析缓存文件。`);
         await refreshKbCacheInfo();
+        if (wasOpen && kbModal) kbModal.hidden = false;
       } catch (e) {
         pushSystem('清理失败：' + String(e.message || e));
       }
@@ -4114,6 +4123,20 @@ async function refreshKbCacheInfo() {
   }
 }
 
+/** 切换设置弹窗里的分类页 */
+function switchSettingsPage(page) {
+  if (!page) return;
+  state.settingsPage = page;
+  document.querySelectorAll('#settingsNav .snav').forEach((b) => {
+    b.classList.toggle('active', b.dataset.page === page);
+  });
+  document.querySelectorAll('.settings-page').forEach((p) => {
+    p.hidden = p.dataset.page !== page;
+  });
+  const box = document.querySelector('#modalSettings .modal-box');
+  if (box) box.scrollTop = 0;
+}
+
 function openSettings() {
   $('#modalMember').hidden = true;
   $('#proxy').value = state.proxy || '';
@@ -4124,6 +4147,7 @@ function openSettings() {
   syncBatchChecks();
   loadAppInfo();
   $('#modalSettings').hidden = false;
+  switchSettingsPage(state.settingsPage || 'providers');
 }
 
 function syncBatchChecks() {
