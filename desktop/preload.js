@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   saveConfig: (patch) => ipcRenderer.invoke('config:save', patch),
 
   // 模型列表：按供应商
+  modelsProbe: (req) => ipcRenderer.invoke('models:probe', req),
   listModels: (providerId, apiKey) => ipcRenderer.invoke('models:list', providerId, apiKey),
 
   // 联网搜索
@@ -30,6 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   kbClearCache: () => ipcRenderer.invoke('kb:clearCache'),
   kbIndex: (paths) => ipcRenderer.invoke('kb:index', paths),
   kbContext: (payload) => ipcRenderer.invoke('kb:context', payload),
+  kbImages: (req) => ipcRenderer.invoke('kb:images', req),
   kbDigest: (payload) => ipcRenderer.invoke('kb:digest', payload),
 
   // 会话

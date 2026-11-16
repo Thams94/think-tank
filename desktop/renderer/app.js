@@ -17,7 +17,7 @@ const state = {
   sessions: [],
   activeSessionId: null,
   collapsed: { sessions: false, members: false, issues: false },
-  kb: { enabled: true, budget: 12000, files: [] },
+  kb: { enabled: true, budget: 2000000, files: [] },
   kbCache: new Map(),
   pendingQuestion: null,
   ranking: { models: [], updatedAt: 0 },
@@ -95,6 +95,59 @@ function providerOf(member) {
   return state.providers.find((p) => p.id === member.providerId) || null;
 }
 
+/** 取某个模型的能力标签（文本 / 视觉） */
+function capsOf(providerId, model) {
+  const p = state.providers.find((x) => x.id === providerId);
+  return (p && p.caps && p.caps[model]) || null;
+}
+
+/** 供界面显示：'' / '文本' / '文本·视觉' / '不可用' */
+function capsLabel(providerId, model) {
+  const c = capsOf(providerId, model);
+  if (!c) return '';
+  const parts = [];
+  if (c.text) parts.push('文本');
+  if (c.vision) parts.push('视觉');
+  return parts.length ? parts.join('·') : '不可用';
+}
+
+/** 逐个供应商测模型能力；已测过的 7 天内跳过 */
+async function probeModelCaps({ force = false, quiet = false } = {}) {
+  if (state.probingCaps) { if (!quiet) pushSystem('正在测试模型能力，请稍候…'); return; }
+  if (!state.providers.length) return;
+  state.probingCaps = true;
+  const total = state.providers.reduce((n, p) => n + (p.models || []).length, 0);
+  try {
+    if ($('#rankingStatus') && !quiet) $('#rankingStatus').textContent = `正在测试 ${total} 个模型的能力…`;
+    let done = 0;
+    for (const p of state.providers) {
+      if (!(p.models || []).length) continue;
+      try {
+        const r = await bridge.modelsProbe({ providerId: p.id, models: p.models, force });
+        if (r && r.ok) p.caps = Object.assign({}, p.caps || {}, r.caps || {});
+        done += (p.models || []).length;
+        if ($('#rankingStatus') && !quiet) $('#rankingStatus').textContent = `已测试 ${done} / ${total} 个模型…`;
+      } catch { /* 单个供应商失败跳过 */ }
+      // 用测试结果同步成员的「看图」能力
+      for (const m of state.members) {
+        if (m.providerId !== p.id) continue;
+        const c = (p.caps || {})[m.model];
+        if (c) m.supportsImages = !!c.vision;
+      }
+    }
+    renderMembers();
+    renderProviders();
+    persistConfig();
+    if (!quiet) {
+      const vision = state.providers.reduce((n, p) => n + Object.values(p.caps || {}).filter((c) => c && c.vision).length, 0);
+      pushSystem(`模型能力测试完成：共 ${total} 个模型，其中 ${vision} 个支持视觉。`);
+    }
+  } finally {
+    state.probingCaps = false;
+    if (state.activeSessionId) saveKbToSession();
+  }
+}
+
 function providerName(id) {
   const p = state.providers.find((x) => x.id === id);
   return p ? p.name : '未指定供应商';
@@ -107,7 +160,7 @@ async function init() {
   state.providers = cfg.providers || [];
   state.proxy = cfg.proxy || '';
   state.groupPrompt = cfg.groupPrompt || '';
-  state.kb = cfg.kb || { enabled: true, budget: 12000, files: [] };
+  state.kb = cfg.kb || { enabled: true, budget: 2000000, files: [] };
   state.collapsed = Object.assign({ sessions: false, members: false, issues: false }, (cfg.settings && cfg.settings.collapsed) || {});
   if (!Array.isArray(state.kb.files)) state.kb.files = [];
   state.members = cfg.members || [];
@@ -139,7 +192,7 @@ async function init() {
       saveKbToSession();      // 旧版本升级：把全局提示词并入当前会话
     }
     if (data.kb && typeof data.kb === 'object') {
-      state.kb = Object.assign({ enabled: true, budget: 12000, files: [], notes: [] }, data.kb);
+      state.kb = Object.assign({ enabled: true, budget: 2000000, files: [], notes: [] }, data.kb);
   if (!Array.isArray(state.kb.notes)) state.kb.notes = [];
     } else if (state.kb.files && state.kb.files.length) {
       // 从旧版本升级：把全局知识库并入当前会话，避免资料丢失
@@ -153,6 +206,7 @@ async function init() {
   bindEvents();
   renderAll();
   loadRankingCache();
+  setTimeout(() => { autoDailySync().catch(() => {}); }, 1200);
 }
 
 function seedMembers() {
@@ -209,6 +263,7 @@ function persistChat() {
       kb: snapshot.kb,
       groupPrompt: snapshot.groupPrompt,
       issues: snapshot.issues,
+      draftPlan: snapshot.draftPlan,
     });
     const s = state.sessions.find((x) => x.id === sessionId);
     if (s) {
@@ -354,21 +409,23 @@ async function switchSession(id) {
       kb: state.kb,
       groupPrompt: state.groupPrompt,
       issues: state.issues,
+      draftPlan: state.draftPlan,
     });
   }
   const data = await bridge.loadSession(id);
   state.activeSessionId = data.id;
   state.messages = data.messages || [];
+  state.draftPlan = data.draftPlan || { team: [], issues: [], questions: [], supplements: [], feedback: [], requirement: '' };
   // 有 members 字段就用它（哪怕是空数组）；老会话没有该字段则沿用当前成员
   if (Array.isArray(data.members)) {
     state.members = data.members;
   }
   state.groupPrompt = typeof data.groupPrompt === 'string' ? data.groupPrompt : '';
   if (data.kb && typeof data.kb === 'object') {
-    state.kb = Object.assign({ enabled: true, budget: 12000, files: [], notes: [] }, data.kb);
+    state.kb = Object.assign({ enabled: true, budget: 2000000, files: [], notes: [] }, data.kb);
     if (!Array.isArray(state.kb.notes)) state.kb.notes = [];
   } else {
-    state.kb = { enabled: true, budget: 12000, files: [], notes: [] };
+    state.kb = { enabled: true, budget: 2000000, files: [], notes: [] };
   }
   state.issues = Array.isArray(data.issues) ? data.issues : [];
   state.currentIssueId = null;
@@ -382,7 +439,7 @@ async function newSession() {
     await bridge.saveSession({ id: state.activeSessionId, messages: state.messages });
   }
   // 新会话：成员和知识库都留空
-  const emptyKb = { enabled: true, budget: 12000, files: [] };
+  const emptyKb = { enabled: true, budget: 2000000, files: [] };
   const s = await bridge.createSession('新会话', [], emptyKb);
   state.sessions.unshift({ id: s.id, title: s.title, messageCount: 0, updatedAt: Date.now() });
   state.activeSessionId = s.id;
@@ -390,6 +447,7 @@ async function newSession() {
   state.members = [];
   state.issues = [];
   state.currentIssueId = null;
+  state.draftPlan = { team: [], issues: [], questions: [], supplements: [], feedback: [], requirement: '' };
   state.groupPrompt = '';
   state.kb = emptyKb;
   state.kbCache.clear();
@@ -553,7 +611,7 @@ function renderMembers() {
       <div class="dot" style="background:${escapeHtml(m.color || '#5b8def')}">${escapeHtml(initials(m.name))}</div>
       <div class="meta">
         <div class="name">${escapeHtml(m.name)}</div>
-        <div class="model" title="${escapeHtml(providerName(m.providerId))} · ${escapeHtml(m.model || '未选模型')}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}">${escapeHtml(m.model || '未选模型')}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}</div>
+        <div class="model" title="${escapeHtml(providerName(m.providerId))} · ${escapeHtml(m.model || '未选模型')}${capsLabel(m.providerId, m.model) ? ' · ' + escapeHtml(capsLabel(m.providerId, m.model)) : ''}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}">${escapeHtml(m.model || '未选模型')}${capsLabel(m.providerId, m.model) ? ' · ' + escapeHtml(capsLabel(m.providerId, m.model)) : ''}${m.reasoning && m.reasoning !== 'off' ? ' · 思考:' + escapeHtml(reasoningLabel(m.reasoning)) : ''}</div>
       </div>`;
     row.onclick = () => openMemberModal(m.id);
     box.appendChild(row);
@@ -1008,7 +1066,7 @@ async function getKbContext(member) {
     const focus = isu ? `${isu.title} ${isu.brief || ''} ${isu.acceptance || ''}` : query;
     let ctx = await bridge.kbContext({
       files: state.kb.files,
-      budget: Number(state.kb.budget) || 12000,
+      budget: Number(state.kb.budget) || 2000000,
       wantImages,
       ocr,
       query,
@@ -1978,7 +2036,8 @@ const PLANNER_SYSTEM = [
   '  "searches": ["检索词1", "检索词2"],',
   '  "questions": [',
   '    {"q":"要问用户的问题","why":"为什么需要这条信息"}',
-  '  ]',
+  '  ],',
+  '  "deliverable": {"type":"提示词|文章|方案|清单|对比表|代码|邮件|其他","note":"交付要求一句话"}',
   '}',
   '',
   '规则：',
@@ -1990,7 +2049,13 @@ const PLANNER_SYSTEM = [
   '6. 选模型时优先看括号里的榜单信息：`榜单 #排名 · 智能指数`，名次越靠前、指数越高越强。主持人、关键审查（安全 / 一致性 / 最终判定）优先用榜单最靠前的；常规审查用中游；整理总结可以用靠后的。没有榜单信息的才参考 S/A/B 等级。',
   '7. 同一个团队不要全用同一个模型，尽量跨供应商以降低同源偏差。',
   '8. questions 列 2–5 个「必须由用户补充、且会实质影响结论」的问题（例如用户的实际处境、偏好、已尝试过的做法、具体现象/案例）。不要问材料里已经写明的东西，也不要问“还需要什么”这种空泛问题。这一轮问清之后，正式讨论不再打扰用户，所以宁可在这里问全。',
-  '9. 所有文字用中文。',
+  '9. deliverable 是用户最终想拿走的东西，必须根据用户这句话判断，不要一律写「方案」：',
+  '   · 说「给我一段提示词 / 帮我写个提示词」→ type=提示词，note 写清用途、目标模型、长度要求；',
+  '   · 说「写一篇文章 / 写个稿子 / 帮我写文案」→ type=文章，note 写清体裁、字数、读者；',
+  '   · 说「列个清单 / 列个表 / 对比一下」→ type=清单 或 对比表；',
+  '   · 说「写代码 / 给个脚本」→ type=代码，note 写清语言与运行环境；',
+  '   · 只是要结论/判断 → type=方案；实在判断不出用「其他」。',
+  '10. 所有文字用中文。',
 ].join('\n');
 
 function plannerRef() {
@@ -2061,7 +2126,12 @@ function parsePlanJson(text) {
   }).filter((x) => x && x.q).slice(0, 6);
 
   if (!normTeam.length && !normIssues.length) return null;
-  return { team: normTeam, issues: normIssues, searches: normSearches, questions: normQuestions };
+  const rawD = (obj.deliverable && typeof obj.deliverable === 'object') ? obj.deliverable : {};
+  const deliverable = {
+    type: String(rawD.type || obj.deliverableType || '').trim().slice(0, 20),
+    note: String(rawD.note || rawD.requirement || '').trim().slice(0, 200),
+  };
+  return { team: normTeam, issues: normIssues, searches: normSearches, questions: normQuestions, deliverable };
 }
 
 const PALETTE = ['#5b8def', '#e06c5b', '#f5a623', '#46c2a3', '#9a6bd4', '#e08bc0'];
@@ -2261,6 +2331,7 @@ async function runPlanner(feedback) {
 
   // 先让模型拟定检索词 → 联网检索 → 把结果作为规划依据
   state.draftPlan.researched = [];
+  if ($('#planUseImages')) $('#planUseImages').checked = state.draftPlan.useImages !== false;
   const wantSearch = $('#planAutoSearch') ? $('#planAutoSearch').checked : false;
   const kbDigest = (typeof bridge.kbDigest === 'function' && state.kb.files && state.kb.files.length) ? null : null;
 
@@ -2310,7 +2381,8 @@ async function runPlanner(feedback) {
     : PLANNER_SYSTEM + '\n\n' + taskLine;
 
   $('#planStatus').textContent = '策划模型正在生成方案…';
-  const res = await bridge.generatePlan({
+
+  const planPayload = {
     providerId: provider.id,
     model,
     messages: [
@@ -2319,7 +2391,25 @@ async function runPlanner(feedback) {
     ],
     json: true,
     maxTokens: 0,
-  });
+  };
+
+  // 知识库图片也发给策划模型（可在弹窗里关掉）
+  let planImages = [];
+  const hasImg = (state.kb.files || []).some((f) => f.kind === 'image');
+  if (state.draftPlan.useImages !== false && hasImg && typeof bridge.kbImages === 'function') {
+    try { planImages = await bridge.kbImages({ files: state.kb.files, limit: 4 }); } catch { planImages = []; }
+  }
+
+  let res = planImages.length
+    ? await bridge.generatePlan(Object.assign({}, planPayload, { images: planImages }))
+    : await bridge.generatePlan(planPayload);
+
+  // 策划模型不支持看图：去掉图片再来一次
+  if ((!res || !res.ok) && planImages.length
+      && /image|vision|content|unsupported|invalid|bad request/i.test(String((res && res.error) || ''))) {
+    res = await bridge.generatePlan(planPayload);
+    if (res && res.ok) pushSystem('策划模型不支持图片，已自动改用纯文字方案。');
+  }
 
   if (!res.ok) {
     const raw = String(res.error || '未知错误');
@@ -2337,7 +2427,19 @@ async function runPlanner(feedback) {
     return false;
   }
   // 模型偶尔只返回一半（例如只有 issues 没有 team）：不要用它把已有方案清空
-  state.draftPlan.questions = plan.questions || [];
+  // 过滤掉已经回答过的同题（模型常把老问题再问一遍）
+  const norm = (t) => String(t || '').replace(/[\s\p{P}]/gu, '').slice(0, 40);
+  const answered = new Set((state.draftPlan.supplements || []).map((x) => norm(x.q)));
+  const fresh = (plan.questions || []).filter((q) => {
+    const k = norm(q && q.q);
+    if (!k) return false;
+    for (const a of answered) {
+      if (a && (a === k || a.includes(k) || k.includes(a))) return false;
+    }
+    return true;
+  });
+  state.draftPlan.questions = fresh.slice(0, 3);
+  if (plan.deliverable && plan.deliverable.type) state.draftPlan.deliverable = plan.deliverable;
   if (plan.team.length) state.draftPlan.team = plan.team;
   else if (!(state.draftPlan.team || []).length) state.draftPlan.team = [];
   if (plan.issues.length) state.draftPlan.issues = plan.issues;
@@ -2426,6 +2528,15 @@ function renderPlanDraft() {
     </div>` : '';
 
   box.innerHTML = `
+    <div class="plan-sec">
+      <div class="plan-sec-h">交付物（决定最后给你什么）</div>
+      <div class="row" style="gap:8px;align-items:center">
+        <select id="planDeliverable" style="flex:0 0 130px">
+          ${['提示词', '文章', '方案', '清单', '对比表', '代码', '邮件', '其他'].map((t) => `<option value="${t}"${(state.draftPlan.deliverable && state.draftPlan.deliverable.type === t) ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
+        <input id="planDeliverableNote" placeholder="交付要求（如：面向小学老师、300 字、可直接复制）" value="${escapeHtml((state.draftPlan.deliverable && state.draftPlan.deliverable.note) || '')}" style="flex:1" />
+      </div>
+    </div>
     <div class="plan-sec"><div class="plan-sec-h">团队（${team.length} 人）</div>${teamHtml}</div>
     <div class="plan-sec"><div class="plan-sec-h">议题卡（${issues.length} 张）</div>${issueHtml}</div>
     ${supHtml}
@@ -2468,6 +2579,7 @@ function saveSupplementsOnly() {
   state.draftPlan.supplements = (state.draftPlan.supplements || []).concat(answers);
   state.draftPlan.questions = [];
   renderPlanDraft();
+  saveKbToSession();
   if ($('#planStatus')) {
     $('#planStatus').textContent = `已保存 ${answers.length} 条补充（共 ${state.draftPlan.supplements.length} 条）。下次生成方案会自动带上。`;
   }
@@ -2492,8 +2604,20 @@ async function submitSupplements() {
   const prevCount = (state.draftPlan.supplements || []).length;
   state.draftPlan.supplements = (state.draftPlan.supplements || []).concat(answers);
   state.draftPlan.questions = [];
+  renderPlanDraft();                        // 先刷新：补充已经进去了，不用等模型
+  saveKbToSession();                        // 立刻落盘，重启也不丢
+  if ($('#planStatus')) {
+    $('#planStatus').textContent = `已保存 ${answers.length} 条补充（共 ${state.draftPlan.supplements.length} 条），正在让策划模型重排方案…`;
+  }
 
   let ok = false;
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    const sec = Math.round((Date.now() - t0) / 1000);
+    if ($('#planStatus') && (state.draftPlan.questions || []).length === 0) {
+      $('#planStatus').textContent = `策划模型正在重排方案…已 ${sec} 秒（模型慢时可能要 1–2 分钟）`;
+    }
+  }, 1000);
   try {
     ok = await runPlanner(null);
   } finally {
@@ -2510,6 +2634,7 @@ async function submitSupplements() {
         if (hit) el.value = hit.a;
       });
     }
+    clearInterval(timer);
     const b2 = $('#btnSubmitSupplements');
     if (b2) { b2.disabled = false; b2.textContent = '提交补充并重新生成'; }
     if (!ok && !state.draftPlan.questions.length) {
@@ -2880,6 +3005,29 @@ async function maybeFinalSummary() {
     return `${i + 1}. ${it.title}｜判定：${it.verdict || '未判定'}\n结论：${(it.conclusion || '（无）').slice(0, cut)}`;
   }).join('\n\n');
 
+  const dv = state.draftPlan.deliverable || {};
+  const dvType = String(dv.type || '').trim();
+  const dvNote = String(dv.note || '').trim();
+  const needArtifact = ['提示词', '文章', '代码', '邮件', '清单', '对比表'].includes(dvType);
+  const deliverableBlock = needArtifact
+    ? [
+        `# 本次交付物：${dvType}${dvNote ? `（要求：${dvNote}）` : ''}`,
+        `用户要的是可**直接拿去用的${dvType}**，不是要点清单。请在最后单独起一段「**${dvType}成品**」，把成品原文完整写出来：`,
+        dvType === '提示词'
+          ? '· 用 ```text 代码块给出**完整提示词原文**，可直接复制粘贴使用；不要写成“建议你这样问”；长度按需求来，通常 200–600 字。'
+          : dvType === '文章'
+            ? '· 直接写**成篇的文章正文**（有开头、主体、结尾），可用小标题，不要只列提纲。'
+            : dvType === '代码'
+              ? '· 用对应语言的代码块给出**完整可运行代码**，需要时补一句运行方式。'
+              : '· 直接给出可复制的完整内容，条目化时保持结构清晰。',
+        '· 成品里出现的信息必须来自本次讨论的结论，不要引入讨论中没有的新事实。',
+        '· 如果还有「需补充」的卡导致成品不完整，仍要先给出一版可用的成品，并在其后用一行说明「补充 XX 后可以再完善」。',
+      ].join('\n')
+    : [
+        dvType ? `# 本次交付物：${dvType}${dvNote ? `（要求：${dvNote}）` : ''}` : '# 本次交付物：方案性结论',
+        '用户没有指定具体成品形态，因此按结论 + 待定项 + 下一步汇报即可，不需要额外写成品。',
+      ].join('\n');
+
   const instruction = [
     '全部议题已经讨论完毕。请用**通俗易懂**的中文逐条汇报，不要用行话，不要复述讨论过程。',
     '',
@@ -2894,6 +3042,8 @@ async function maybeFinalSummary() {
     '最后再写两段：',
     '**总体结论**：一句话概括现在能不能定下来；全部都是「需补充」就写「目前还没有结论」，并说明卡在哪。',
     '**下一步**：1–3 条能直接动手的事；如果是等补充，就写补充完之后先做什么。',
+    '',
+    deliverableBlock,
     '',
     '格式示例：',
     '```',
@@ -3103,6 +3253,38 @@ async function onProviderAction(card, act) {
   }
 }
 
+/** 每天首次启动时自动拉一遍模型列表与榜单（失败静默） */
+async function autoDailySync() {
+  if (!state.providers.length) return;
+  const DAY = 24 * 3600 * 1000;
+  const last = Number(state.settings.lastAutoSync) || 0;
+  if (Date.now() - last < DAY) return;
+  if (state.autoSyncRunning) return;
+  state.autoSyncRunning = true;
+  try {
+    let okCount = 0;
+    for (const p of state.providers) {
+      try {
+        const models = await bridge.listModels(p.id);
+        if (Array.isArray(models) && models.length) { p.models = models; okCount++; }
+      } catch { /* 单个供应商失败忽略 */ }
+    }
+    if (okCount) {
+      await bridge.saveConfig({ providers: state.providers });
+      renderProviders();
+      renderMembers();
+      probeModelCaps({ quiet: true });
+    }
+    let rankingOk = false;
+    try { rankingOk = await refreshRanking(); } catch { rankingOk = false; }
+    state.settings.lastAutoSync = Date.now();
+    persistConfig();
+    pushSystem(`每日自动更新完成：模型列表 ${okCount} 个供应商，榜单${rankingOk ? '已刷新' : '刷新失败（继续用缓存）'}。`);
+  } finally {
+    state.autoSyncRunning = false;
+  }
+}
+
 async function fetchAllModels() {
   const btn = $('#btnFetchAllModels');
   if (!btn || btn.disabled) return;
@@ -3152,6 +3334,7 @@ async function fetchAllModels() {
   } finally {
     btn.disabled = false;
     btn.textContent = '🔄 一键拉取全部模型';
+    probeModelCaps({ quiet: true });
   }
 }
 
@@ -3183,8 +3366,11 @@ function renderModelOptions(providerId, currentModel) {
     return;
   }
 
-  sel.innerHTML = models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')
-    + `<option value="${CUSTOM_MODEL}">自定义输入…</option>`;
+  const pid = providerId;   // renderModelOptions 的第一个参数就是供应商 id
+  sel.innerHTML = models.map((m) => {
+    const tag = capsLabel(pid, m);
+    return `<option value="${escapeHtml(m)}">${escapeHtml(m)}${tag ? ' — ' + escapeHtml(tag) : ''}</option>`;
+  }).join('') + `<option value="${CUSTOM_MODEL}">自定义输入…</option>`;
   sel.value = currentModel && models.includes(currentModel) ? currentModel : models[0];
   custom.hidden = true;
   custom.value = '';
@@ -3415,6 +3601,9 @@ function bindEvents() {
   $('#btnGroupPrompt').onclick = openGroupPrompt;
   $('#btnCancelGroupPrompt').onclick = () => { $('#modalGroupPrompt').hidden = true; };
   $('#btnSaveGroupPrompt').onclick = saveGroupPrompt;
+  if ($('#planUseImages')) {
+    $('#planUseImages').onchange = () => { state.draftPlan.useImages = $('#planUseImages').checked; };
+  }
   $('#btnPlan').onclick = openPlanModal;
   $('#btnPlanGenerate').onclick = () => runPlanner(null);
   $('#btnPlanRegenerate').onclick = () => runPlanner($('#planFeedback').value.trim());
@@ -3424,6 +3613,14 @@ function bindEvents() {
     $('#planDraft').addEventListener('click', (e) => {
       if (e.target && e.target.id === 'btnSubmitSupplements') submitSupplements();
       if (e.target && e.target.id === 'btnSaveSuppOnly') saveSupplementsOnly();
+      if (e.target && e.target.id === 'planDeliverable') {
+        state.draftPlan.deliverable = Object.assign({}, state.draftPlan.deliverable, { type: e.target.value });
+        saveKbToSession();
+      }
+      if (e.target && e.target.id === 'planDeliverableNote') {
+        state.draftPlan.deliverable = Object.assign({}, state.draftPlan.deliverable, { note: e.target.value.trim() });
+        saveKbToSession();
+      }
       if (e.target && e.target.id === 'btnToggleSup') {
         state.draftPlan.supExpanded = !(state.draftPlan.supExpanded === true);
         renderPlanDraft();
@@ -3438,6 +3635,7 @@ function bindEvents() {
     el.addEventListener('input', () => autoGrow(el));
   }
   $('#btnPlanClose').onclick = () => { $('#modalPlan').hidden = true; };
+  $('#btnClearIssues').onclick = () => clearIssuesOnly();
   $('#btnAddIssue').onclick = () => {
     $('#issueEditId').value = ''; $('#issueTitle').value = ''; $('#issueBrief').value = ''; $('#issueAcceptance').value = '';
     $('#modalIssue').hidden = false;
@@ -3498,7 +3696,7 @@ function bindEvents() {
     };
   }
   $('#kbBudget').onchange = () => {
-    state.kb.budget = Math.max(1000, Number($('#kbBudget').value) || 12000);
+    state.kb.budget = Math.max(1000, Number($('#kbBudget').value) || 2000000);
     state.kbCache.clear();
     saveKbToSession();
   };
@@ -3508,6 +3706,7 @@ function bindEvents() {
   $('#btnCloseSettings').onclick = () => { $('#modalSettings').hidden = true; };
   $('#btnAddProvider').onclick = addProvider;
   $('#btnFetchAllModels').onclick = fetchAllModels;
+  if ($('#btnProbeModels')) $('#btnProbeModels').onclick = () => probeModelCaps({ force: true });
 
   $('#btnAddKb').onclick = async () => {
     const paths = await bridge.kbPick();
@@ -3561,7 +3760,7 @@ function bindEvents() {
     const capInput = Number($('#safetyCap').value);
     state.settings.safetyCap = Number.isFinite(capInput) && capInput > 0 ? Math.round(capInput) : DEFAULT_SAFETY_CAP;
     if ($('#disableHttp2')) state.settings.disableHttp2 = $('#disableHttp2').checked === true;
-    state.settings.plannerProviderId = $('#plannerProvider').value || null;
+      state.settings.plannerProviderId = $('#plannerProvider').value || null;
     state.settings.plannerModel = $('#plannerModel').value || null;
     state.kbCache.clear();
 
@@ -3617,6 +3816,33 @@ function bindEvents() {
     renderAll();
   };
 
+/** 只清空议题卡，不动聊天记录 */
+async function clearIssuesOnly() {
+  if (!state.issues.length) { pushSystem('当前没有议题卡。'); return; }
+  const n = state.issues.length;
+  const ok1 = await askUser({
+    title: '清空议题卡',
+    message: `清空全部 ${n} 张议题卡？聊天记录不受影响，但议题卡上的结论会一起删除。`,
+    danger: true,
+    okText: '继续',
+  });
+  if (!ok1) return;
+  const ok2 = await askUser({
+    title: '再次确认',
+    message: `确定要删除这 ${n} 张议题卡吗？结论和判定都会一并删除，且无法恢复。`,
+    danger: true,
+    okText: '彻底删除',
+  });
+  if (!ok2) return;
+  state.issues = [];
+  state.currentIssueId = null;
+  state.draftPlan = { team: [], issues: [], questions: [], supplements: [], feedback: [], requirement: '' };
+  renderIssues();
+  updateResumeButton();
+  saveKbToSession();
+  pushSystem('已清空议题卡，聊天记录保留。');
+}
+
   $('#btnClear').onclick = async () => {
     const ok = await askUser({
       title: '清空会话',
@@ -3626,10 +3852,11 @@ function bindEvents() {
     });
     if (!ok) return;
     resetRunState();              // 关键：先中止在跑的请求，否则会一直卡在 running
-    state.messages = [];
+    state.messages = [];          // 只清聊天记录，议题卡保留
     try { await bridge.clearChat(); } catch { /* 忽略 */ }
     renderMessages();
     refreshUsageTotal();
+    updateResumeButton();
     if (document.hasFocus()) $('#input').focus();
   };
 }
@@ -3645,6 +3872,7 @@ function saveKbToSession() {
       kb: state.kb,
       groupPrompt: state.groupPrompt,
       issues: state.issues,
+      draftPlan: state.draftPlan,
     });
   }
   persistConfig();
@@ -3869,7 +4097,7 @@ function saveGroupPrompt() {
 
 async function openKb() {
   $('#kbEnabled').checked = state.kb.enabled !== false;
-  $('#kbBudget').value = state.kb.budget || 12000;
+  $('#kbBudget').value = state.kb.budget || 2000000;
   renderKbList();
   $('#modalKb').hidden = false;
   await refreshKbCacheInfo();

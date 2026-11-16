@@ -7,6 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>智库</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Cdefs%3E%3ClinearGradient id=%27g%27 x1=%270%27 y1=%270%27 x2=%270%27 y2=%271%27%3E%3Cstop offset=%270%27 stop-color=%27%233A5C9E%27/%3E%3Cstop offset=%271%27 stop-color=%27%2310182C%27/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%27100%27 height=%27100%27 rx=%2722%27 fill=%27url(%23g)%27/%3E%3Ctext x=%2750%27 y=%2771%27 font-size=%2752%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27Microsoft YaHei,sans-serif%27%3E智%3C/text%3E%3C/svg%3E">
+  <link rel="icon" type="image/png" href="icon.png" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -14,7 +15,7 @@
     <!-- 第一栏：会话 -->
     <aside class="sessions">
       <div class="brand small">
-        <span class="logo">智</span>
+        <img class="logo" src="icon.png" alt="智库" draggable="false" />
         <div class="brand-text">
           <div class="brand-title">智库</div>
           <div class="brand-sub" id="connState">未配置</div>
@@ -96,6 +97,9 @@
         <button class="collapse" id="btnCollapseIssues" title="收起 / 展开议题栏">⟩</button>
       </div>
       <div class="members" id="issueList"></div>
+      <div class="issues-foot">
+        <button class="ghost" id="btnClearIssues" title="只清空议题卡，不影响聊天记录">清空议题卡</button>
+      </div>
     </aside>
 
 
@@ -110,6 +114,7 @@
       <div id="providerList" class="providers"></div>
       <button class="ghost add-provider" id="btnAddProvider">+ 添加供应商</button>
       <button class="ghost" id="btnFetchAllModels" style="margin-top:6px">🔄 一键拉取全部模型</button>
+      <button class="ghost" id="btnProbeModels" style="margin-top:6px" title="逐个模型发一次最小请求，检测是否支持文本 / 视觉">🧪 测试模型能力（文本 / 视觉）</button>
 
       <label>代理（留空 = 使用系统代理）
         <input id="proxy" placeholder="http://127.0.0.1:10808" />
@@ -185,6 +190,10 @@
         <button class="ghost" id="btnRefreshRanking">刷新模型榜单</button>
         <span class="muted" id="rankingStatus">榜单未加载</span>
       </div>
+      <label class="inline-toggle" title="把知识库里的图片也发给策划模型（需要策划模型支持看图）">
+        <input type="checkbox" id="planUseImages" checked />
+        🖼 让策划模型也看图
+      </label>
       <label class="inline-toggle" title="开启后会先用策划模型生成检索词，联网检索后把结果存入知识库">
         <input type="checkbox" id="planAutoSearch" checked />
         生成方案前先联网检索，并把结果存入资料库
@@ -283,7 +292,7 @@
         <button class="ghost danger" id="btnClearKb">清空全部</button>
       </div>
       <label>注入上限（字符）
-        <input id="kbBudget" type="number" step="1000" min="1000" max="2000000" value="12000" />
+        <input id="kbBudget" type="number" step="1000" min="1000" max="2000000" value="2000000" />
       </label>
       <div class="row kb-cache-row">
         <span class="muted" id="kbCacheInfo">解析缓存：—</span>

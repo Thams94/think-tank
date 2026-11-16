@@ -168,6 +168,7 @@ function normalizeProvider(p) {
     baseUrl: p.baseUrl || '',
     apiKeyEnc: p.apiKeyEnc || '',
     models: Array.isArray(p.models) ? p.models : [],
+    caps: (p.caps && typeof p.caps === 'object') ? p.caps : {},
   };
 }
 
@@ -213,7 +214,7 @@ function loadConfig() {
     providers,
     proxy: raw.proxy || '',
     groupPrompt: raw.groupPrompt || '',
-    kb: raw.kb || { enabled: true, budget: 12000, files: [] },
+    kb: raw.kb || { enabled: true, budget: 2000000, files: [] },
     members,
     settings: raw.settings || { mode: 'manual', rounds: 1, moderatorId: null },
   };
@@ -427,7 +428,7 @@ async function readStream(res, onDelta) {
 }
 
 /** 非流式单次补全（供策划模型用，支持 JSON 结构化输出） */
-async function completeChat({ baseUrl, apiKey, model, messages, temperature, maxTokens, reasoning, json }) {
+async function completeChat({ baseUrl, apiKey, model, messages, temperature, maxTokens, reasoning, json, timeoutMs = 150000, attempts = 2 }) {
   const base = normalizeBase(baseUrl);
   const body = {
     model,
@@ -446,7 +447,7 @@ async function completeChat({ baseUrl, apiKey, model, messages, temperature, max
 
   let res = await fetchRetry(`${base}/chat/completions`, {
     method: 'POST', headers, body: JSON.stringify(body),
-  }, { attempts: 2, timeoutMs: 150000, label: '模型请求' });
+  }, { attempts, timeoutMs, label: '模型请求' });
 
   // 服务端不认 response_format / reasoning_effort：去掉后重试一次
   if (!res.ok) {
@@ -493,13 +494,20 @@ function createWindow() {
     minWidth: 980,
     minHeight: 640,
     title: '智库',
-    backgroundColor: '#0f1117',
+    backgroundColor: '#0b0d12',
     autoHideMenuBar: true,
+    frame: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#0b0d12', symbolColor: '#e6e9ef', height: 36 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+  // Win11 才支持 Mica，Win10 调用会报错，忽略即可
+  win.once('ready-to-show', () => {
+    try { win.setBackgroundMaterial('mica'); } catch { /* 不支持 */ }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -570,6 +578,7 @@ ipcMain.handle('config:save', (_e, patch) => {
         id: p.id,
         name: p.name,
         baseUrl: p.baseUrl,
+        caps: (p.caps && typeof p.caps === 'object') ? p.caps : (old ? old.caps : {}),
         apiKeyEnc,
         models: p.models,
       });
@@ -1090,7 +1099,9 @@ async function extractText(filePath) {
 
 /** Windows 自带 OCR（WinRT），不需要安装额外软件 */
 async function ocrImage(filePath) {
-  const script = path.join(__dirname, 'tools', 'ocr.ps1');
+  // 打包后脚本在 app.asar.unpacked 里（asar 内的文件 PowerShell 读不到）
+  const script = path.join(__dirname, 'tools', 'ocr.ps1')
+    .replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
   const { execFile } = require('node:child_process');
   return new Promise((resolve, reject) => {
     execFile('powershell.exe',
@@ -1262,8 +1273,11 @@ async function kbEnsureCache(entry) {
   } else {
     text = await withTimeout(extractText(entry.path), timeout, '文档');
   }
-  fs.mkdirSync(KB_CACHE_DIR, { recursive: true });
-  fs.writeFileSync(cp, text, 'utf8');
+  // 图片没识别出文字时不要缓存空结果，否则以后一直读到空
+  if (!(entry.kind === 'image' && !String(text || '').trim())) {
+    fs.mkdirSync(KB_CACHE_DIR, { recursive: true });
+    fs.writeFileSync(cp, text, 'utf8');
+  }
   return text;
 }
 
@@ -1810,7 +1824,7 @@ async function buildKbBlocks(docs, budget, focus) {
   };
 }
 
-ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = false, query = '', focus = '' }) => {
+ipcMain.handle('kb:context', async (_e, { files, budget = 2000000, wantImages = false, query = '', focus = '' }) => {
   const safeFiles = (files || []).filter((f) => isApprovedPath(f.path));
   const docs = safeFiles.filter((f) => f.kind !== 'image');
   const images = safeFiles.filter((f) => f.kind === 'image');
@@ -1847,7 +1861,11 @@ ipcMain.handle('kb:context', async (_e, { files, budget = 12000, wantImages = fa
       try {
         const t = (await kbEnsureCache(f)) || '';
         const clean = t.trim();
-        if (!clean) continue;
+        if (!clean) {
+          // 识别不出也要告诉模型「有这张图」，否则它以为用户没提供
+          parts.push(`【图片：${f.name}（未能识别文字；如需按图评审，请把该成员的模型换成支持看图的）】`);
+          continue;
+        }
         const remain = budget - used;
         if (remain <= 100) break;
         const slice = clean.slice(0, remain);
@@ -1971,7 +1989,7 @@ ipcMain.handle('sessions:create', (_e, title, members, kb, groupPrompt, issues) 
   const snapshot = Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : [];
   const kbSnapshot = kb && typeof kb === 'object'
     ? JSON.parse(JSON.stringify(kb))
-    : { enabled: true, budget: 12000, files: [] };
+    : { enabled: true, budget: 2000000, files: [] };
   writeJson(sessionPath(id), {
     id, title: t, messages: [], members: snapshot, kb: kbSnapshot,
     groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : '',
@@ -1994,7 +2012,7 @@ ipcMain.handle('sessions:load', (_e, id) => {
 
 const sessionSaveSeq = new Map();   // 每个会话最后写入的保存序号，用来丢弃过期保存
 
-ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt, issues, seq }) => {
+ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPrompt, issues, draftPlan, seq }) => {
   // 序号更旧的保存直接丢弃：避免排队中的旧快照覆盖刚写入的新数据
   if (typeof seq === 'number') {
     const last = sessionSaveSeq.get(id) || 0;
@@ -2010,9 +2028,10 @@ ipcMain.handle('sessions:save', (_e, { id, messages, title, members, kb, groupPr
     members: Array.isArray(members) ? JSON.parse(JSON.stringify(members)) : (existing.members || []),
     kb: (kb && typeof kb === 'object')
       ? JSON.parse(JSON.stringify(kb))
-      : (existing.kb || { enabled: true, budget: 12000, files: [] }),
+      : (existing.kb || { enabled: true, budget: 2000000, files: [] }),
     groupPrompt: typeof groupPrompt === 'string' ? groupPrompt : (existing.groupPrompt || ''),
     issues: Array.isArray(issues) ? JSON.parse(JSON.stringify(issues)) : (existing.issues || []),
+    draftPlan: (draftPlan && typeof draftPlan === 'object') ? JSON.parse(JSON.stringify(draftPlan)) : (existing.draftPlan || null),
     savedAt: Date.now(),
   };
   writeJson(sessionPath(id), data);
@@ -2119,21 +2138,146 @@ ipcMain.handle('chat:run', async (e, req) => {
   }
 });
 
+ipcMain.handle('kb:images', async (_e, { files, limit = 4 }) => {
+  const out = [];
+  for (const f of (files || [])) {
+    if (f.kind !== 'image' || !isApprovedPath(f.path)) continue;
+    if (out.length >= limit) break;
+    try {
+      const buf = fs.readFileSync(f.path);
+      const lower = String(f.path).toLowerCase();
+      const mime = lower.endsWith('.png') ? 'image/png'
+        : lower.endsWith('.webp') ? 'image/webp'
+        : lower.endsWith('.gif') ? 'image/gif'
+        : lower.endsWith('.bmp') ? 'image/bmp'
+        : 'image/jpeg';
+      out.push({ name: f.name, url: `data:${mime};base64,${buf.toString('base64')}` });
+    } catch { /* 单张失败忽略 */ }
+  }
+  return out;
+});
+
+/**
+ * 模型能力探测：文本 / 视觉。
+ * 结果写进 provider.caps[model] = { text, vision, at }，7 天内不重复测。
+ */
+async function probeModel(provider, model) {
+  const apiKey = decryptKey(provider.apiKeyEnc);
+  const base = normalizeBase(provider.baseUrl);
+  const out = { text: false, vision: false, at: Date.now(), error: '' };
+
+  // 文本：最小一次对话
+  try {
+    const res = await fetchRetry(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: '回复 ok' }],
+        max_tokens: 8,
+        temperature: 0,
+      }),
+    }, { attempts: 1, timeoutMs: 20000, label: '能力测试' });
+    if (res.ok) {
+      out.text = true;
+    } else {
+      const t = await res.text().catch(() => '');
+      out.error = `HTTP ${res.status} ${String(t).slice(0, 80)}`;
+    }
+  } catch (e) {
+    out.error = String((e && e.message) || e).slice(0, 80);
+    return out;                       // 连不上就不用测视觉了
+  }
+
+  // 视觉：发一张纯红图，问颜色
+  try {
+    const res = await fetchRetry(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '这张图是什么颜色？只回答颜色名。' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAOklEQVR4nO3RQREAQAjDwHJC8C8KMSchfPhlBZSZUNOdS+90PR5Y8AfIRMhEyETIRMhEyETIRMhEIR/SgAFY1t5YwgAAAABJRU5ErkJggg==' } },
+          ],
+        }],
+        max_tokens: 16,
+        temperature: 0,
+      }),
+    }, { attempts: 1, timeoutMs: 25000, label: '视觉测试' });
+    out.vision = res.ok;
+  } catch { out.vision = false; }
+
+  return out;
+}
+
+ipcMain.handle('models:probe', async (_e, { providerId, models, force = false }) => {
+  const cfg = loadConfig();
+  const provider = getProvider(cfg, providerId);
+  if (!provider) return { ok: false, error: '没有这个供应商' };
+  const list = Array.isArray(models) ? models.slice(0, 200) : (provider.models || []);
+  if (!list.length) return { ok: false, error: '没有模型可测' };
+
+  provider.caps = provider.caps && typeof provider.caps === 'object' ? provider.caps : {};
+  const TTL = 7 * 24 * 3600 * 1000;
+  const results = {};
+  let tested = 0;
+
+  for (const model of list) {
+    const prev = provider.caps[model];
+    if (!force && prev && prev.at && Date.now() - prev.at < TTL) {
+      results[model] = prev;
+      continue;
+    }
+    const r = await probeModel(provider, model);
+    provider.caps[model] = r;
+    results[model] = r;
+    tested++;
+    // 每测完一个就落盘，中途关掉也不丢
+    const all = loadConfig();
+    const p2 = (all.providers || []).find((x) => x.id === provider.id);
+    if (p2) { p2.caps = provider.caps; saveConfig(all); }
+  }
+
+  return { ok: true, caps: results, tested, total: list.length };
+});
+
 ipcMain.handle('plan:generate', async (_e, req) => {
   const cfg = loadConfig();
   const provider = getProvider(cfg, req.providerId);
   if (!provider) return { ok: false, error: '没有可用的供应商，请先在设置里添加' };
   const apiKey = decryptKey(provider.apiKeyEnc);
+  // 把知识库图片塞进最后一条 user 消息（多模态 content）
+  const msgs = Array.isArray(req.messages) ? req.messages.map((m) => ({ ...m })) : [];
+  const imgs = Array.isArray(req.images) ? req.images.filter((x) => x && x.url).slice(0, 6) : [];
+  if (imgs.length) {
+    let idx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'user') { idx = i; break; } }
+    if (idx >= 0) {
+      const text = String(msgs[idx].content || '');
+      msgs[idx] = {
+        role: 'user',
+        content: [{ type: 'text', text }].concat(
+          imgs.map((im) => ({ type: 'image_url', image_url: { url: im.url } })),
+        ),
+      };
+    }
+  }
+
   try {
     const out = await completeChat({
       baseUrl: provider.baseUrl,
       apiKey,
       model: req.model,
-      messages: req.messages,
+      messages: msgs,
       temperature: 0.3,
       maxTokens: req.maxTokens,
       reasoning: 'off',
       json: req.json !== false,
+      timeoutMs: 120000,      // 策划最多等 2 分钟，别让用户干等 5 分钟
+      attempts: 1,            // 策划不重试，失败立刻报错让用户决定
     });
     return { ok: true, text: out.text, usage: out.usage };
   } catch (err) {
